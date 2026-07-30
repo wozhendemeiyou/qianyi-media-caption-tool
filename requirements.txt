@@ -1,0 +1,4 @@
+Pillow==12.3.0
+pillow-heif==1.4.0
+requests==2.34.2
+PyInstaller==6.21.0

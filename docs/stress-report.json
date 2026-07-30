@@ -1,0 +1,123 @@
+{
+  "configuration": {
+    "batch": 2000,
+    "cancel": 2000,
+    "export": 10000,
+    "scan": 10000,
+    "scan_bad": 50,
+    "scan_orphans": 100,
+    "similarity": 1500
+  },
+  "environment": {
+    "cpu_count": 32,
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.13"
+  },
+  "generated_at": "2026-07-29T20:28:24+0800",
+  "offline": true,
+  "passed": true,
+  "performance_limits": {
+    "bulk_export": 120,
+    "cancellation_under_load": 10,
+    "concurrent_batch_with_failures": 60,
+    "large_directory_scan": 60,
+    "peak_rss_mb": 512,
+    "suite_seconds": 300,
+    "worst_case_similarity_group": 60
+  },
+  "product": "MediaCaptionTool 3.3",
+  "profile": "standard",
+  "results": [
+    {
+      "duration_limit_seconds": 60,
+      "error": "",
+      "files": 10000,
+      "invalid_captions": 500,
+      "items": 10050,
+      "missing_captions": 7000,
+      "name": "large_directory_scan",
+      "orphan_captions": 100,
+      "passed": true,
+      "peak_rss_limit_mb": 512,
+      "peak_rss_mb": 60.64,
+      "performance_violations": [],
+      "rss_delta_mb": 17.36,
+      "seconds": 12.938,
+      "setup_seconds": 7.38,
+      "unreadable": 50
+    },
+    {
+      "concurrency": 10,
+      "duration_limit_seconds": 60,
+      "error": "",
+      "events": {
+        "done": 1,
+        "progress": 2000,
+        "scan": 1,
+        "status": 4000
+      },
+      "failed": 117,
+      "items": 2000,
+      "name": "concurrent_batch_with_failures",
+      "passed": true,
+      "peak_active_requests": 10,
+      "peak_rss_limit_mb": 512,
+      "peak_rss_mb": 55.62,
+      "performance_violations": [],
+      "requests": 2000,
+      "rss_delta_mb": 1.23,
+      "seconds": 6.277,
+      "setup_seconds": 1.999,
+      "success": 1883
+    },
+    {
+      "cancel_latency_seconds": 0.891,
+      "cancelled": 1962,
+      "duration_limit_seconds": 10,
+      "error": "",
+      "items": 2000,
+      "name": "cancellation_under_load",
+      "passed": true,
+      "peak_rss_limit_mb": 512,
+      "peak_rss_mb": 56.32,
+      "performance_violations": [],
+      "requests_before_stop": 40,
+      "rss_delta_mb": 0.68,
+      "seconds": 1.14,
+      "setup_seconds": 1.971,
+      "success_before_stop": 38
+    },
+    {
+      "csv_bytes": 688906,
+      "duration_limit_seconds": 120,
+      "error": "",
+      "items": 10000,
+      "jsonl_bytes": 948890,
+      "name": "bulk_export",
+      "passed": true,
+      "peak_rss_limit_mb": 512,
+      "peak_rss_mb": 77.48,
+      "performance_violations": [],
+      "rss_delta_mb": 14.68,
+      "seconds": 14.739,
+      "setup_seconds": 14.117
+    },
+    {
+      "duration_limit_seconds": 60,
+      "error": "",
+      "groups": 1,
+      "items": 1500,
+      "largest_group": 1500,
+      "name": "worst_case_similarity_group",
+      "passed": true,
+      "peak_rss_limit_mb": 512,
+      "peak_rss_mb": 70.87,
+      "performance_violations": [],
+      "rss_delta_mb": 1.14,
+      "seconds": 2.011,
+      "setup_seconds": 1.497
+    }
+  ],
+  "suite_performance_violation": "",
+  "total_seconds": 76.615
+}

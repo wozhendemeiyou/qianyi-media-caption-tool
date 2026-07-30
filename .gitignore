@@ -1,0 +1,41 @@
+# Python
+.venv*/
+__pycache__/
+*.py[cod]
+
+# Build and release output
+build/
+dist/
+*.zip
+*.exe
+
+# Local analysis and reverse-engineering artifacts
+.analysis_tools/
+analysis/
+MediaCaptionTool.exe_extracted/
+MediaCaptionTool-2.1-Pro-Debug.spec
+MediaCaptionTool-2.1-Pro.spec
+MediaCaptionTool-3.0.spec
+MediaCaptionTool-3.1.spec
+MediaCaptionTool-3.2.spec
+media_caption_tool_launcher.py
+
+# Source artwork and one-off asset preparation helpers
+assets/*-source.*
+assets/launch-tech.png
+tools/generate_launch_visual.py
+tools/prepare_launch_screen.py
+
+# Local application state and secrets
+config.json
+settings.json
+credentials.bin
+.env
+.env.*
+*.log
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
