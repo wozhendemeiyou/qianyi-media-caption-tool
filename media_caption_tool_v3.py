@@ -34,7 +34,6 @@ from media_caption_core import (
     open_image,
     prepend_trigger_word,
     scan_media,
-    should_show_seed_2_0_shutdown_notice,
     write_caption,
 )
 
@@ -401,7 +400,6 @@ class CaptionApp:
         self.events_after_id = None
         self.sash_after_id = None
         self.splash_after_id = None
-        self.startup_after_id = None
         self.scan_generation = 0
         self.launch_progress = 0
         self._launch_source: Image.Image | None = None
@@ -412,9 +410,6 @@ class CaptionApp:
         self._project_banner_photo = None
         self.project_paths: dict[str, Path] = {}
         self.workspace_project: Path | None = None
-        self._startup_actions_scheduled = False
-        self._startup_actions_done = False
-        self.shutdown_notice_dialog: tk.Toplevel | None = None
         self.counts = {status: 0 for status in STATUS_TEXT}
         self.counts["total"] = 0
 
@@ -731,14 +726,14 @@ class CaptionApp:
             lambda path: self.thumbnail_cache.get(str(path)),
         )
 
-        right_tabs = ttk.Notebook(preview_panel)
-        right_tabs.pack(fill=tk.BOTH, expand=True)
-        preview_tab = ttk.Frame(right_tabs, padding=8)
-        prompt_tab = ttk.Frame(right_tabs, padding=8)
-        log_tab = ttk.Frame(right_tabs, padding=6)
-        right_tabs.add(preview_tab, text="检查")
-        right_tabs.add(prompt_tab, text="提示词")
-        right_tabs.add(log_tab, text="运行")
+        self.right_tabs = ttk.Notebook(preview_panel)
+        self.right_tabs.pack(fill=tk.BOTH, expand=True)
+        preview_tab = ttk.Frame(self.right_tabs, padding=8)
+        prompt_tab = ttk.Frame(self.right_tabs, padding=8)
+        log_tab = ttk.Frame(self.right_tabs, padding=6)
+        self.right_tabs.add(preview_tab, text="检查")
+        self.right_tabs.add(prompt_tab, text="提示词")
+        self.right_tabs.add(log_tab, text="运行")
 
         preview_head = ttk.Frame(preview_tab)
         preview_head.pack(fill=tk.X)
@@ -757,9 +752,9 @@ class CaptionApp:
         self.preset_box = ttk.Combobox(prompt_bar, textvariable=self.preset_var, state="readonly", width=20)
         self.preset_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.preset_box.bind("<<ComboboxSelected>>", self.apply_preset)
-        ttk.Button(prompt_bar, text="导入", command=self.import_prompt_file).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(prompt_bar, text="保存", command=self.save_preset).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(prompt_bar, text="删除", command=self.delete_preset).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(prompt_bar, text="导入", width=6, command=self.import_prompt_file).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(prompt_bar, text="保存", width=6, command=self.save_preset).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(prompt_bar, text="删除", width=6, command=self.delete_preset).pack(side=tk.LEFT, padx=(6, 0))
         subject_row = ttk.Frame(prompt_tab)
         subject_row.pack(fill=tk.X, pady=(0, 7))
         ttk.Label(subject_row, text="主体过滤").pack(side=tk.LEFT)
@@ -767,9 +762,18 @@ class CaptionApp:
         ttk.Entry(subject_row, textvariable=self.subject_filter_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(7, 0)
         )
-        self.prompt_text = scrolledtext.ScrolledText(prompt_tab, wrap=tk.WORD, font=("Microsoft YaHei UI", 9))
-        self.prompt_text.pack(fill=tk.BOTH, expand=True)
-        self._style_text(self.prompt_text)
+        ttk.Label(prompt_tab, text="用户要求（可选）").pack(anchor=tk.W)
+        self.user_prompt_text = scrolledtext.ScrolledText(
+            prompt_tab, height=4, wrap=tk.WORD, font=("Microsoft YaHei UI", 9)
+        )
+        self.user_prompt_text.pack(fill=tk.X, pady=(4, 9))
+        self._style_text(self.user_prompt_text)
+        ttk.Label(prompt_tab, text="系统提示词模板").pack(anchor=tk.W)
+        self.system_prompt_text = scrolledtext.ScrolledText(
+            prompt_tab, wrap=tk.WORD, font=("Microsoft YaHei UI", 9)
+        )
+        self.system_prompt_text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        self._style_text(self.system_prompt_text)
 
         self.log_text = scrolledtext.ScrolledText(log_tab, width=34, wrap=tk.WORD, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -1155,79 +1159,6 @@ class CaptionApp:
         self._restore_main_window()
         self.project_center_frame.pack(fill=tk.BOTH, expand=True)
         self.refresh_project_center()
-        self._schedule_startup_actions()
-
-    def _schedule_startup_actions(self) -> None:
-        if self._startup_actions_done or self._startup_actions_scheduled or self.closing:
-            return
-        self._startup_actions_scheduled = True
-        self.startup_after_id = self.root.after(350, self._run_startup_actions)
-
-    def _run_startup_actions(self) -> None:
-        self.startup_after_id = None
-        self._startup_actions_scheduled = False
-        if self.closing:
-            return
-        self._startup_actions_done = True
-        if should_show_seed_2_0_shutdown_notice(self.settings):
-            self.show_seed_2_0_shutdown_notice()
-
-    def show_seed_2_0_shutdown_notice(self) -> tk.Toplevel:
-        if (
-            self.shutdown_notice_dialog is not None
-            and self.shutdown_notice_dialog.winfo_exists()
-        ):
-            self.shutdown_notice_dialog.lift()
-            return self.shutdown_notice_dialog
-        dialog = tk.Toplevel(self.root)
-        self.shutdown_notice_dialog = dialog
-        dialog.title("重要提醒：模型计费即将变更")
-        dialog.resizable(False, False)
-        try:
-            dialog.attributes("-topmost", True)
-        except tk.TclError:
-            pass
-        frame = ttk.Frame(dialog, padding=22)
-        frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(
-            frame,
-            text="Seed 2.0 Pro 即将退出 Coding Plan",
-            style="AlertTitle.TLabel",
-        ).pack(anchor=tk.W)
-        ttk.Label(
-            frame,
-            text=(
-                "2026 年 8 月 8 日起，该模型将改为按量计费。\n"
-                "继续使用可能产生额外费用，请留意账户余额与用量。\n"
-                "建议优先切换到 Seed 2.1 Pro Turbo。"
-            ),
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(12, 14))
-        suppress_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            frame, text="不再提醒此消息", variable=suppress_var
-        ).pack(anchor=tk.W)
-
-        def dismiss() -> None:
-            if suppress_var.get():
-                self.settings["suppress_seed_2_0_shutdown_notice"] = True
-                self.settings_store.save(self.settings)
-            self.shutdown_notice_dialog = None
-            dialog.destroy()
-
-        ttk.Button(frame, text="我知道了", style="Primary.TButton", command=dismiss).pack(
-            anchor=tk.E, pady=(14, 0)
-        )
-        dialog.protocol("WM_DELETE_WINDOW", dismiss)
-        center_dialog(dialog, self.root)
-        dialog.grab_set()
-        dialog.lift()
-        dialog.focus_force()
-        try:
-            dialog.bell()
-        except tk.TclError:
-            pass
-        return dialog
 
     def show_workspace(self) -> None:
         self._hide_views()
@@ -1548,7 +1479,8 @@ class CaptionApp:
         if selected not in presets:
             selected = next(iter(presets))
         self.preset_var.set(selected)
-        self._set_prompt(presets[selected])
+        self._set_system_prompt(presets[selected])
+        self.user_prompt_text.insert("1.0", self.settings.get("user_prompt", ""))
         self._backend_changed()
         self._switch_view()
 
@@ -1582,9 +1514,9 @@ class CaptionApp:
         if selected:
             self.local_model_var.set(selected)
 
-    def _set_prompt(self, value: str) -> None:
-        self.prompt_text.delete("1.0", tk.END)
-        self.prompt_text.insert("1.0", value)
+    def _set_system_prompt(self, value: str) -> None:
+        self.system_prompt_text.delete("1.0", tk.END)
+        self.system_prompt_text.insert("1.0", value)
 
     def browse_folder(self) -> None:
         selected = filedialog.askdirectory(title="选择媒体项目目录", initialdir=self.folder_var.get() or None)
@@ -1594,11 +1526,11 @@ class CaptionApp:
     def apply_preset(self, _event=None) -> None:
         prompt = self.settings["prompt_presets"].get(self.preset_var.get())
         if prompt is not None:
-            self._set_prompt(prompt)
+            self._set_system_prompt(prompt)
 
     def import_prompt_file(self) -> None:
         selected = filedialog.askopenfilename(
-            title="导入提示词",
+            title="导入系统提示词模板",
             filetypes=[("提示词文本", "*.txt *.md"), ("所有文件", "*.*")],
         )
         if not selected:
@@ -1611,12 +1543,12 @@ class CaptionApp:
         if not prompt:
             messagebox.showwarning("提示", "提示词文件为空", parent=self.root)
             return
-        self._set_prompt(prompt)
-        self.log(f"已导入提示词：{selected}")
+        self._set_system_prompt(prompt)
+        self.log(f"已导入系统提示词模板：{selected}")
 
     def save_preset(self) -> None:
         name = simpledialog.askstring("保存提示词预设", "预设名称", parent=self.root)
-        prompt = self.prompt_text.get("1.0", tk.END).strip()
+        prompt = self.system_prompt_text.get("1.0", tk.END).strip()
         if not name or not prompt:
             return
         self.settings["prompt_presets"][name] = prompt
@@ -1646,41 +1578,39 @@ class CaptionApp:
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(frame, text="火山方舟 API Key").grid(row=0, column=0, sticky=tk.W)
-        api_key_var = tk.StringVar()
+        has_stored_key = bool(self.settings_store.get_api_key())
+        masked_placeholder = "*" * 16 if has_stored_key else ""
+        api_key_var = tk.StringVar(value=masked_placeholder)
         entry = ttk.Entry(frame, textvariable=api_key_var, width=58, show="•")
         entry.grid(row=0, column=1, padx=(10, 0), sticky=tk.EW)
-        stored_var = tk.StringVar(value="已安全保存" if self.settings_store.get_api_key() else "未设置")
+        stored_var = tk.StringVar(value="已安全保存（脱敏显示）" if has_stored_key else "未设置")
         ttk.Label(frame, textvariable=stored_var).grid(row=1, column=1, sticky=tk.W, pady=(6, 0))
         ttk.Separator(frame).grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=12)
-        remind_shutdown_var = tk.BooleanVar(
-            value=not bool(
-                self.settings.get("suppress_seed_2_0_shutdown_notice", False)
-            )
-        )
-        ttk.Checkbutton(
-            frame,
-            text="提醒 Seed 2.0 Pro Coding Plan 下线",
-            variable=remind_shutdown_var,
-        ).grid(row=3, column=0, columnspan=2, sticky=tk.W)
 
         def clear_key() -> None:
             if messagebox.askyesno("清除 API Key", "确定清除已保存的 API Key？", parent=dialog):
-                self.settings_store.set_api_key("")
+                try:
+                    self.settings_store.set_api_key("")
+                except OSError as error:
+                    messagebox.showerror("清除失败", str(error), parent=dialog)
+                    return
+                api_key_var.set("")
                 stored_var.set("未设置")
 
         def save() -> None:
             value = api_key_var.get().strip()
-            if value:
-                self.settings_store.set_api_key(value)
-            self.settings["suppress_seed_2_0_shutdown_notice"] = not bool(
-                remind_shutdown_var.get()
-            )
+            try:
+                if not (has_stored_key and value == masked_placeholder):
+                    self.settings_store.set_api_key(value)
+            except OSError as error:
+                messagebox.showerror("保存失败", str(error), parent=dialog)
+                return
             self.settings_store.save(self.settings)
             dialog.destroy()
             self.log("设置已保存")
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=4, column=0, columnspan=2, sticky=tk.E, pady=(14, 0))
+        buttons.grid(row=3, column=0, columnspan=2, sticky=tk.E, pady=(2, 0))
         ttk.Button(buttons, text="清除密钥", command=clear_key).pack(side=tk.LEFT)
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=(6, 0))
@@ -1688,6 +1618,8 @@ class CaptionApp:
         dialog.grab_set()
         dialog.lift()
         entry.focus_set()
+        if masked_placeholder:
+            entry.selection_range(0, tk.END)
         return dialog
 
     def _save_workspace_settings(self) -> None:
@@ -1711,6 +1643,7 @@ class CaptionApp:
             ),
             "output_language": self.output_language_var.get(),
             "trigger_word": self.trigger_word_var.get().strip(),
+            "user_prompt": self.user_prompt_text.get("1.0", tk.END).strip(),
             "model_key": self._model_key(),
             "selected_preset": self.preset_var.get(),
         })
@@ -1749,14 +1682,18 @@ class CaptionApp:
 
     def _validate_task(self) -> tuple[Path, str, str] | None:
         folder = Path(self.folder_var.get().strip())
-        prompt = self.prompt_text.get("1.0", tk.END).strip()
+        system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
+        user_prompt = self.user_prompt_text.get("1.0", tk.END).strip()
         api_key = self.settings_store.get_api_key()
         if not folder.is_dir():
             messagebox.showwarning("提示", "请选择有效的项目目录", parent=self.root)
             return None
-        if not prompt:
-            messagebox.showwarning("提示", "提示词不能为空", parent=self.root)
+        if not system_prompt:
+            messagebox.showwarning("提示", "系统提示词模板不能为空", parent=self.root)
             return None
+        prompt = system_prompt
+        if user_prompt:
+            prompt = f"{system_prompt}\n\n## 用户要求\n{user_prompt}"
         backend = self.backend_var.get()
         if backend == "local":
             model_folder = Path(self.local_model_var.get().strip())
@@ -2534,7 +2471,6 @@ class CaptionApp:
             self.events_after_id,
             self.sash_after_id,
             self.splash_after_id,
-            self.startup_after_id,
         ):
             if after_id is not None:
                 try:
@@ -2544,7 +2480,6 @@ class CaptionApp:
         self.events_after_id = None
         self.sash_after_id = None
         self.splash_after_id = None
-        self.startup_after_id = None
         self.root.destroy()
 
 

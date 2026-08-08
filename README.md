@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 [![Tests](https://img.shields.io/badge/Tests-44%20passed-35B46F)](./tests)
-[![Version](https://img.shields.io/badge/Release-v3.3-1ED8FF)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.3)
+[![Version](https://img.shields.io/badge/Release-v3.4-1ED8FF)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.4)
 
 > API Key 不在仓库、程序包或普通配置文件中。用户在软件内自行填写后，密钥使用 Windows DPAPI 加密并保存在当前 Windows 账户的本地应用目录。
 
@@ -24,6 +24,7 @@
 | --- | --- |
 | 一次扫描，完整配对 | 递归发现图片、视频和同名 TXT，立即区分缺少标签、无效标签、孤立 TXT、不可读媒体与输出冲突。 |
 | 面向训练目标的提示策略 | 可选择训练主体、风格 LoRA 或风景/场景侧重点，支持中文自然语言、英文描述和逗号词组标签。 |
+| 双层提示词编辑 | 用户要求与系统提示词模板分区编辑；导入、保存和删除预设只作用于系统模板，任务开始时再按清晰边界组合。 |
 | 可恢复的批处理 | 跳过已有有效 TXT，失败项独立记录并可重试；停止任务后再次运行不会浪费已经完成的结果。 |
 | 实际 10 并发 | 外部 API 后台可同时执行 10 个请求。标准压力测试记录 `peak_active_requests: 10`，界面数值与线程池一致。 |
 | 安全的密钥与数据边界 | API Key 由 DPAPI 加密；项目删除只清理应用元数据，不删除原始媒体；生成结果只写入同名 TXT。 |
@@ -36,10 +37,11 @@
 1. 在项目中心添加一个媒体目录。
 2. 选择图片或视频、输出格式、训练侧重点、语言、模型和并发数。
 3. 在设置中填写自己的火山方舟 API Key。
-4. 点击“扫描”，先处理缺少 TXT、无效 TXT、孤立 TXT 和重名输出冲突。
-5. 点击“开始任务”或只处理当前筛选/选中的素材。
-6. 在右侧检查生成结果，必要时编辑、批量替换或添加触发词。
-7. 导出训练数据 JSONL/CSV，或直接使用媒体旁的 sidecar TXT。
+4. 在提示词页选择或导入系统模板，并按任务需要填写用户要求。
+5. 点击“扫描”，先处理缺少 TXT、无效 TXT、孤立 TXT 和重名输出冲突。
+6. 点击“开始任务”或只处理当前筛选/选中的素材。
+7. 在右侧检查生成结果，必要时编辑、批量替换或添加触发词。
+8. 导出训练数据 JSONL/CSV，或直接使用媒体旁的 sidecar TXT。
 
 每个媒体文件对应同目录、同文件名的 TXT：
 
@@ -85,17 +87,13 @@ dataset/
 | 豆包 Seed 2.1 Pro Turbo | `doubao-seed-2-1-turbo-260628` | `/api/coding/v3/chat/completions` | Coding Plan |
 | 豆包 Seed 1.6 Vision | `doubao-seed-1-6-251015` | `/api/coding/v3/chat/completions` | Coding Plan |
 | 豆包 Seed 2.1 Pro | `doubao-seed-2-1-pro-260628` | `/api/v3/chat/completions` | 按量计费 |
-| 豆包 Seed 2.0 Pro（2026-08-08 前） | `doubao-seed-2-0-pro-260215` | `/api/coding/v3/chat/completions` | Coding Plan（8 月 8 日下线） |
-| 豆包 Seed 2.0 Pro（2026-08-08 起） | `doubao-seed-2-0-pro-260215` | `/api/v3/chat/completions` | 按量计费 |
-
-Seed 2.0 Pro 在 2026 年 8 月 8 日当天自动切换到按量接口。软件启动后会用独立置顶窗口提醒计费变化，用户可以选择“不再提醒此消息”，并可在设置中重新开启。
-
-![Seed 2.0 Pro 下线提醒](docs/images/model-notice.png)
+| 豆包 Seed 2.0 Pro | `doubao-seed-2-0-pro-260215` | `/api/v3/chat/completions` | 按量计费 |
 
 ## 安全与隐私
 
 - 仓库和 Release 安装包不包含 API Key、最近项目、数据集路径或运行记录。
 - API Key 通过 Windows DPAPI 加密到 `%LOCALAPPDATA%\MediaCaptionTool\credentials.bin`。
+- 设置页只显示脱敏占位符；清空密钥会删除 DPAPI 密文，并清理旧版配置中的明文残留。
 - 普通设置 JSON 不保存明文 API Key、模型接口地址或认证头。
 - HTTP 错误日志会清理 Bearer Key，并保留请求 ID 便于排查。
 - 项目运行状态、失败清单和日志位于 `%LOCALAPPDATA%\MediaCaptionTool`。
@@ -140,7 +138,7 @@ python -m venv .venv312
 .\.venv312\Scripts\python.exe tools\stress_test.py --profile standard
 ```
 
-2026-07-29 标准档结果：
+2026-08-08 标准档结果：
 
 | 场景 | 规模 | 结果 |
 | --- | --- | --- |
@@ -150,12 +148,12 @@ python -m venv .venv312
 | JSONL/CSV 导出 | 10,000 条 | 通过 |
 | 最坏重复图聚类 | 1,500 张同组图片 | 通过 |
 
-标准档总耗时 76.615 秒，峰值 RSS 77.48 MB；完整报告见 [`docs/stress-report.json`](docs/stress-report.json)。这验证的是本地处理路径，不代表火山方舟账户的服务端限流或配额容量。
+标准档总耗时 76.875 秒，峰值 RSS 78.34 MB；完整报告见 [`docs/stress-report.json`](docs/stress-report.json)。这验证的是本地处理路径，不代表火山方舟账户的服务端限流或配额容量。
 
 ## 构建 Windows EXE
 
 ```powershell
-.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.3.spec
+.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.4.spec
 ```
 
 构建配置只收集运行所需代码与四个视觉资源，不打入 API Key、用户设置、项目记录或本地模型权重。
@@ -170,7 +168,7 @@ python -m venv .venv312
 ├── tools/                        # 截图和压力测试工具
 ├── media_caption_core.py         # 扫描、模型路由、HTTP、日志与批任务
 ├── media_caption_tool_v3.py      # Tkinter 桌面工作台
-├── MediaCaptionTool-3.3.spec     # PyInstaller 单文件构建
+├── MediaCaptionTool-3.4.spec     # PyInstaller 单文件构建
 ├── requirements.txt              # 基础依赖
 └── requirements-local.txt        # 可选本地模型依赖
 ```

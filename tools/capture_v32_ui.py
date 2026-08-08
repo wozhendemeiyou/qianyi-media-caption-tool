@@ -81,7 +81,7 @@ def create_media(folder: Path) -> None:
 
 
 def main() -> None:
-    output = ROOT / "analysis" / "ui-v33"
+    output = ROOT / "analysis" / "ui-v34"
     with tempfile.TemporaryDirectory() as directory:
         temp = Path(directory)
         projects = [temp / "人物训练集", temp / "产品素材复核", temp / "短视频分镜", temp / "旧项目目录"]
@@ -159,6 +159,12 @@ def main() -> None:
             update_for(root, 0.9)
             capture_window(root, output / "workbench-1180x680.png")
 
+            app.right_tabs.select(1)
+            app.user_prompt_text.insert("1.0", "保留人物五官、发型与服装细节，弱化背景元素。")
+            update_for(root, 0.25)
+            capture_window(root, output / "prompt-editor-1180x680.png")
+            app.right_tabs.select(0)
+
             root.geometry("960x620+80+60")
             update_for(root, 0.35)
             capture_window(root, output / "workbench-960x620.png")
@@ -173,11 +179,6 @@ def main() -> None:
             capture_window(dialog, output / "settings-dialog.png")
             dialog.destroy()
 
-            notice = app.show_seed_2_0_shutdown_notice()
-            update_for(root, 0.25)
-            capture_window(notice, output / "seed-2.0-shutdown-notice.png")
-            notice.destroy()
-            app.shutdown_notice_dialog = None
         finally:
             gui.load_project_summary = original_summary
             app.close()

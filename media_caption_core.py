@@ -27,7 +27,7 @@ import requests
 
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 CODING_CHAT_URL = "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
 STANDARD_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 FILES_URL = "https://ark.cn-beijing.volces.com/api/v3/files"
@@ -68,7 +68,6 @@ VIDEO_UPLOAD_LIMIT = 512 * 1024 * 1024
 MAX_CONCURRENCY = 10
 HEIF_DECODE_LOCK = threading.Lock()
 SEED_2_0_PLAN_END_DATE = date(2026, 8, 8)
-SEED_2_0_NOTICE_START_DATE = date(2026, 7, 24)
 
 
 @dataclass(frozen=True)
@@ -258,7 +257,7 @@ class DpapiSecretStore(SecretStore):
 
 
 DEFAULT_SETTINGS = {
-    "version": 4,
+    "version": 5,
     "model_key": DEFAULT_MODEL_KEY,
     "last_folder": "",
     "recent_folders": [],
@@ -273,9 +272,9 @@ DEFAULT_SETTINGS = {
     "labeling_focus": "subject",
     "output_language": "zh",
     "trigger_word": "",
+    "user_prompt": "",
     "selected_preset": "详细自然语言",
     "prompt_presets": {},
-    "suppress_seed_2_0_shutdown_notice": False,
 }
 
 
@@ -350,6 +349,8 @@ class SettingsStore:
             settings["recent_folders"] = []
         presets = settings.get("prompt_presets")
         settings["prompt_presets"] = dict(presets) if isinstance(presets, dict) else {}
+        user_prompt = settings.get("user_prompt")
+        settings["user_prompt"] = user_prompt if isinstance(user_prompt, str) else ""
         settings["backend"] = settings.get("backend") if settings.get("backend") in {"api", "local"} else "api"
         settings["labeling_focus"] = (
             settings.get("labeling_focus")
@@ -361,18 +362,31 @@ class SettingsStore:
             if settings.get("output_language") in {"zh", "en"}
             else "zh"
         )
-        settings["suppress_seed_2_0_shutdown_notice"] = bounded_bool(
-            settings.get("suppress_seed_2_0_shutdown_notice"), False
-        )
-        plaintext_key = source.get("api_key") or legacy.get("api_key")
+        plaintext_key = source.get("api_key")
         if plaintext_key and not self.secret_store.get():
             self.secret_store.set(str(plaintext_key))
+            try:
+                self._remove_legacy_api_key()
+            except OSError:
+                pass
         settings.pop("api_key", None)
         settings.pop("chat_url", None)
         settings.pop("model", None)
         settings.pop("model_id", None)
         settings.pop("auto_check_updates", None)
-        if source and (not stored or any(k in source for k in ("api_key", "chat_url", "model"))):
+        settings.pop("suppress_seed_2_0_shutdown_notice", None)
+        if source and (
+            not stored
+            or any(
+                key in source
+                for key in (
+                    "api_key",
+                    "chat_url",
+                    "model",
+                    "suppress_seed_2_0_shutdown_notice",
+                )
+            )
+        ):
             self.save(settings)
         return settings
 
@@ -384,34 +398,37 @@ class SettingsStore:
             "model",
             "model_id",
             "auto_check_updates",
+            "suppress_seed_2_0_shutdown_notice",
         ):
             cleaned.pop(key, None)
-        cleaned["version"] = 4
+        cleaned["version"] = 5
         cleaned["concurrency"] = bounded_int(
             cleaned.get("concurrency", 3), 3, 1, MAX_CONCURRENCY
         )
-        cleaned["suppress_seed_2_0_shutdown_notice"] = bounded_bool(
-            cleaned.get("suppress_seed_2_0_shutdown_notice"), False
-        )
+        user_prompt = cleaned.get("user_prompt")
+        cleaned["user_prompt"] = user_prompt if isinstance(user_prompt, str) else ""
         atomic_write_json(self.settings_path, cleaned)
+
+    def _remove_legacy_api_key(self) -> None:
+        if not self.legacy_path.exists():
+            return
+        legacy = load_json(self.legacy_path, {})
+        if not isinstance(legacy, dict) or "api_key" not in legacy:
+            return
+        legacy.pop("api_key", None)
+        if legacy:
+            atomic_write_json(self.legacy_path, legacy)
+        else:
+            self.legacy_path.unlink(missing_ok=True)
 
     def get_api_key(self) -> str:
         return self.secret_store.get()
 
     def set_api_key(self, value: str) -> None:
-        self.secret_store.set(value.strip())
-
-
-def should_show_seed_2_0_shutdown_notice(
-    settings: dict[str, Any], today: date | None = None
-) -> bool:
-    current = today or date.today()
-    return (
-        SEED_2_0_NOTICE_START_DATE <= current < SEED_2_0_PLAN_END_DATE
-        and not bounded_bool(
-            settings.get("suppress_seed_2_0_shutdown_notice"), False
-        )
-    )
+        normalized = value.strip()
+        self.secret_store.set(normalized)
+        if not normalized:
+            self._remove_legacy_api_key()
 
 
 def caption_path_for(media_path: Path) -> Path:

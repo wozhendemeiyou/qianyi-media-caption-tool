@@ -29,7 +29,6 @@ class GuiTests(unittest.TestCase):
     def _store(
         root_path: Path,
         api_key: str = "",
-        suppress_notice: bool = True,
     ) -> core.SettingsStore:
         store = core.SettingsStore(
             root_path / "settings.json",
@@ -37,7 +36,6 @@ class GuiTests(unittest.TestCase):
             MemorySecretStore(api_key),
         )
         settings = store.load()
-        settings["suppress_seed_2_0_shutdown_notice"] = suppress_notice
         store.save(settings)
         return store
 
@@ -458,71 +456,75 @@ class GuiTests(unittest.TestCase):
                 root.update_idletasks()
                 app.close()
 
-    def test_shutdown_notice_can_be_suppressed_persistently(self):
+    def test_prompt_tab_combines_user_request_with_system_template(self):
         with tempfile.TemporaryDirectory() as directory:
             root_path = Path(directory)
             root = tk.Tk()
-            store = self._store(root_path, suppress_notice=False)
+            store = self._store(root_path, api_key="fake-key")
+            app = gui.CaptionApp(root, store, show_splash=False)
+            try:
+                app.folder_var.set(str(root_path))
+                app.system_prompt_text.delete("1.0", tk.END)
+                app.system_prompt_text.insert("1.0", "系统模板")
+                app.user_prompt_text.insert("1.0", "保留人物脸部细节")
+
+                validated = app._validate_task()
+
+                self.assertIsNotNone(validated)
+                self.assertEqual(
+                    "系统模板\n\n## 用户要求\n保留人物脸部细节",
+                    validated[1],
+                )
+                app._save_workspace_settings()
+                self.assertEqual("保留人物脸部细节", store.load()["user_prompt"])
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_settings_masks_and_fully_clears_saved_api_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            root = tk.Tk()
+            store = self._store(root_path, api_key="real-secret-key")
             app = gui.CaptionApp(root, store, show_splash=False)
             dialog = None
             try:
-                dialog = app.show_seed_2_0_shutdown_notice()
-
                 def descendants(widget):
                     for child in widget.winfo_children():
                         yield child
                         yield from descendants(child)
 
+                dialog = app.open_settings()
                 controls = list(descendants(dialog))
-                suppress = next(
+                entry = next(widget for widget in controls if isinstance(widget, ttk.Entry))
+                clear = next(
                     widget
                     for widget in controls
-                    if isinstance(widget, ttk.Checkbutton)
-                    and widget.cget("text") == "不再提醒此消息"
+                    if isinstance(widget, ttk.Button) and widget.cget("text") == "清除密钥"
                 )
-                confirm = next(
-                    widget
+                self.assertTrue(entry.get())
+                self.assertNotIn("real-secret-key", entry.get())
+                self.assertFalse(any(
+                    isinstance(widget, ttk.Checkbutton)
+                    and "Seed 2.0" in str(widget.cget("text"))
                     for widget in controls
-                    if isinstance(widget, ttk.Button)
-                    and widget.cget("text") == "我知道了"
-                )
-                suppress.invoke()
-                confirm.invoke()
-                dialog = None
-                self.assertTrue(
-                    store.load()["suppress_seed_2_0_shutdown_notice"]
-                )
+                ))
+
+                with mock.patch.object(gui.messagebox, "askyesno", return_value=True):
+                    clear.invoke()
+
+                self.assertEqual("", entry.get())
+                self.assertEqual("", store.get_api_key())
+                dialog.destroy()
+                dialog = app.open_settings()
+                controls = list(descendants(dialog))
+                entry = next(widget for widget in controls if isinstance(widget, ttk.Entry))
+                self.assertEqual("", entry.get())
             finally:
                 if dialog is not None and dialog.winfo_exists():
                     dialog.destroy()
                 root.update_idletasks()
                 app.close()
-
-    def test_startup_opens_independent_topmost_shutdown_notice(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root_path = Path(directory)
-            root = tk.Tk()
-            root.withdraw()
-            store = self._store(root_path, suppress_notice=False)
-            with mock.patch.object(
-                gui, "should_show_seed_2_0_shutdown_notice", return_value=True
-            ):
-                app = gui.CaptionApp(root, store, show_splash=False)
-                try:
-                    deadline = time.monotonic() + 1
-                    while app.shutdown_notice_dialog is None and time.monotonic() < deadline:
-                        root.update_idletasks()
-                        root.update()
-                        time.sleep(0.02)
-                    dialog = app.shutdown_notice_dialog
-                    self.assertIsNotNone(dialog)
-                    self.assertIsInstance(dialog, tk.Toplevel)
-                    self.assertEqual("", dialog.transient())
-                    self.assertTrue(bool(dialog.attributes("-topmost")))
-                    self.assertIn("重要提醒", dialog.title())
-                finally:
-                    root.update_idletasks()
-                    app.close()
 
     def test_launch_asset_resolves_and_smoke_view_skips_animation(self):
         with tempfile.TemporaryDirectory() as directory:

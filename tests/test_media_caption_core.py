@@ -78,35 +78,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.STANDARD_CHAT_URL, legacy.chat_url_for(core.date(2026, 8, 8)))
         self.assertEqual("按量计费", legacy.billing_label(core.date(2026, 8, 8)))
 
-    def test_seed_2_0_shutdown_notice_window_and_suppression(self):
-        settings = {"suppress_seed_2_0_shutdown_notice": False}
-        self.assertFalse(
-            core.should_show_seed_2_0_shutdown_notice(
-                settings, core.date(2026, 7, 23)
-            )
-        )
-        self.assertTrue(
-            core.should_show_seed_2_0_shutdown_notice(
-                settings, core.date(2026, 7, 24)
-            )
-        )
-        self.assertTrue(
-            core.should_show_seed_2_0_shutdown_notice(
-                settings, core.date(2026, 8, 7)
-            )
-        )
-        self.assertFalse(
-            core.should_show_seed_2_0_shutdown_notice(
-                settings, core.date(2026, 8, 8)
-            )
-        )
-        settings["suppress_seed_2_0_shutdown_notice"] = True
-        self.assertFalse(
-            core.should_show_seed_2_0_shutdown_notice(
-                settings, core.date(2026, 8, 7)
-            )
-        )
-
     def test_small_video_uses_model_route_and_correct_mime(self):
         with tempfile.TemporaryDirectory() as directory:
             video_path = Path(directory) / "clip.mov"
@@ -388,6 +359,28 @@ class CoreTests(unittest.TestCase):
             self.assertNotIn("api_key", persisted)
             self.assertNotIn("chat_url", persisted)
             self.assertNotIn("legacy-secret", persisted)
+            migrated_legacy = json.loads(legacy.read_text(encoding="utf-8"))
+            self.assertNotIn("api_key", migrated_legacy)
+
+            store.set_api_key("")
+            self.assertEqual("", secrets.get())
+            restarted = core.SettingsStore(settings_path, legacy, secrets)
+            restarted.load()
+            self.assertEqual("", secrets.get())
+
+    @unittest.skipUnless(os.name == "nt", "DPAPI is only available on Windows")
+    def test_dpapi_secret_store_deletes_encrypted_file_when_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "credentials.bin"
+            secrets = core.DpapiSecretStore(secret_path)
+
+            secrets.set("temporary-test-key")
+            self.assertTrue(secret_path.is_file())
+            self.assertEqual("temporary-test-key", secrets.get())
+
+            secrets.set("")
+            self.assertFalse(secret_path.exists())
+            self.assertEqual("", secrets.get())
 
     def test_settings_recover_from_malformed_persisted_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -398,6 +391,7 @@ class CoreTests(unittest.TestCase):
                     "concurrency": "not-a-number",
                     "recent_folders": "C:/not-a-list",
                     "prompt_presets": ["not", "a", "mapping"],
+                    "user_prompt": ["not", "text"],
                     "suppress_seed_2_0_shutdown_notice": "true",
                 }),
                 encoding="utf-8",
@@ -413,12 +407,14 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(3, settings["concurrency"])
             self.assertEqual([], settings["recent_folders"])
             self.assertEqual({}, settings["prompt_presets"])
-            self.assertTrue(settings["suppress_seed_2_0_shutdown_notice"])
+            self.assertEqual("", settings["user_prompt"])
+            self.assertNotIn("suppress_seed_2_0_shutdown_notice", settings)
 
             settings["concurrency"] = "also-invalid"
             store.save(settings)
             persisted = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(3, persisted["concurrency"])
+            self.assertNotIn("suppress_seed_2_0_shutdown_notice", persisted)
 
     def test_project_summary_reports_saved_progress_and_directory_state(self):
         with tempfile.TemporaryDirectory() as directory:
