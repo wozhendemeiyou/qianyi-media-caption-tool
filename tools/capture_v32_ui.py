@@ -130,6 +130,7 @@ def main() -> None:
             }
 
         gui.load_project_summary = visual_summary
+        gui.enable_dpi_awareness()
         root = tk.Tk()
         root.geometry("960x620+80+60")
         app = gui.CaptionApp(root, store, show_splash=False)
@@ -137,46 +138,96 @@ def main() -> None:
             root.state("normal")
             root.deiconify()
             app.show_launch()
-            root.geometry("1180x680+70+50")
+            root.geometry("1900x1080+180+90")
             update_for(root, 0.35)
-            capture_window(root, output / "launch-1180x680.png", composited=True)
+            capture_window(root, output / "launch-1900x1080.png", composited=True)
 
             app.workspace_project = projects[0]
             app.show_project_center()
             root.state("normal")
-            root.geometry("960x620+80+60")
+            root.geometry("1200x760+80+40")
             update_for(root, 0.35)
-            capture_window(root, output / "project-center-960x620.png")
+            capture_window(root, output / "project-center-night-1200x760.png")
+
+            app._set_theme("day")
+            update_for(root, 0.25)
+            capture_window(root, output / "project-center-day-1200x760.png")
 
             app.folder_var.set(str(projects[0]))
             app.show_workspace()
             root.state("normal")
-            root.geometry("1180x680+70+50")
+            root.geometry("1500x1200+40+20")
             app._handle_scan(core.scan_media(projects[0], "image"))
+            first_item = next(iter(app.items.values()))
+            app._gallery_selected(first_item["path"], False)
             app.folder_var.set(r"D:\AI-Datasets\人物训练集")
             app._relative_path = lambda path: path.name
             app.refresh_table()
             update_for(root, 0.9)
-            capture_window(root, output / "workbench-1180x680.png")
+            capture_window(root, output / "workbench-day-1500x1200.png")
 
-            app.right_tabs.select(1)
+            app._set_theme("night")
+            update_for(root, 0.25)
+            capture_window(root, output / "workbench-night-1500x1200.png")
+            app._show_update_banner({
+                "tag": "v99.0",
+                "url": "https://github.com/example/releases/tag/v99.0",
+                "notes": "视觉测试更新",
+                "is_newer": True,
+            })
+            update_for(root, 0.2)
+            capture_window(root, output / "workbench-update-banner.png")
+            app.dismiss_update_banner()
+            app.show_system_info()
+            update_for(root, 0.25)
+            capture_window(root, output / "system-info-night.png")
+            app._set_theme("day")
+            update_for(root, 0.25)
+            capture_window(root, output / "system-info-day.png")
+            app.show_workspace()
+            update_for(root, 0.25)
+
+            root.geometry("1024x720+60+40")
+            update_for(root, 0.35)
+            capture_window(root, output / "workbench-day-1024x720.png")
+            root.geometry("1500x1200+40+20")
+            update_for(root, 0.35)
+
+            tooltip = app.nav_tooltips[2]
+            tooltip.show()
+            update_for(root, 0.1)
+            capture_window(tooltip.window, output / "tooltip-day.png")
+            tooltip.hide()
+
+            app.inspector_tabs.select(app.prompt_tab)
             app.user_prompt_text.insert("1.0", "保留人物五官、发型与服装细节，弱化背景元素。")
             update_for(root, 0.25)
-            capture_window(root, output / "prompt-editor-1180x680.png")
-            app.right_tabs.select(0)
+            capture_window(root, output / "prompt-editor-day-1500x1200.png")
+            app._set_theme("night")
+            update_for(root, 0.25)
+            capture_window(root, output / "prompt-editor-night-1500x1200.png")
+            app._set_theme("day")
+            app.inspector_tabs.select(app.result_tab)
 
-            root.geometry("960x620+80+60")
-            update_for(root, 0.35)
-            capture_window(root, output / "workbench-960x620.png")
+            app.sampling_preset_var.set("创意扩写")
+            app.apply_sampling_preset()
+            app.right_tabs.select(app.task_settings_tab)
+            update_for(root, 0.25)
+            capture_window(root, output / "task-settings-collapsed.png")
+            app._toggle_sampling_panel(True)
+            update_for(root, 0.25)
+            capture_window(root, output / "task-settings-expanded.png")
+            app._toggle_sampling_panel(False)
+            app.right_tabs.select(app.preview_tab)
 
             app.filter_var.set("孤立 TXT")
             app._filter_changed()
             update_for(root, 0.25)
             capture_window(root, output / "orphan-txt-filter.png")
 
-            dialog = app.open_settings()
+            dialog = app.open_platform_config()
             update_for(root, 0.25)
-            capture_window(dialog, output / "settings-dialog.png")
+            capture_window(dialog, output / "platform-settings.png")
             dialog.destroy()
 
         finally:

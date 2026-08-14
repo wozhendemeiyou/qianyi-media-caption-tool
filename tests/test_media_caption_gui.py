@@ -1,13 +1,15 @@
 from pathlib import Path
+from collections import Counter
 import tempfile
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageGrab
 
 import media_caption_core as core
 import media_caption_tool_v3 as gui
@@ -39,17 +41,53 @@ class GuiTests(unittest.TestCase):
         store.save(settings)
         return store
 
-    def test_main_window_uses_centered_restore_bounds_and_starts_maximized(self):
+    def test_main_window_uses_expanded_centered_restore_bounds(self):
         root = mock.Mock()
-        root.winfo_screenwidth.return_value = 1920
-        root.winfo_screenheight.return_value = 1080
+        root.winfo_screenwidth.return_value = 2560
+        root.winfo_screenheight.return_value = 1440
 
         geometry = gui.configure_main_window(root)
 
-        self.assertEqual("1180x760+370+160", geometry)
-        root.geometry.assert_called_once_with("1180x760+370+160")
-        root.minsize.assert_called_once_with(960, 620)
-        root.state.assert_called_once_with("zoomed")
+        self.assertEqual("1720x1200+420+120", geometry)
+        root.geometry.assert_called_once_with("1720x1200+420+120")
+        root.minsize.assert_called_once_with(1024, 720)
+        root.state.assert_not_called()
+
+    def test_public_build_starts_with_an_empty_prompt_library(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            try:
+                self.assertEqual({}, gui.DEFAULT_PRESETS)
+                self.assertEqual({}, app.settings["prompt_presets"])
+                self.assertEqual("", app.preset_var.get())
+                self.assertFalse(app.preset_box.cget("values"))
+                self.assertEqual(
+                    "", app.system_prompt_text.get("1.0", tk.END).strip()
+                )
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_launch_window_is_compact_centered_and_opaque(self):
+        root = mock.Mock()
+        root.winfo_screenwidth.return_value = 2560
+        root.winfo_screenheight.return_value = 1440
+        app = gui.CaptionApp.__new__(gui.CaptionApp)
+        app.root = root
+
+        with mock.patch.object(gui.sys, "platform", "win32"):
+            app._use_fullscreen_launch_window()
+
+        root.withdraw.assert_called_once_with()
+        root.overrideredirect.assert_called_once_with(True)
+        root.minsize.assert_called_once_with(1900, 1080)
+        root.geometry.assert_called_once_with("1900x1080+330+180")
+        root.configure.assert_called_once_with(background="#090d1d")
+        root.wm_attributes.assert_any_call("-topmost", True)
 
     def test_batch_start_snapshots_tk_values_on_main_thread(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +112,7 @@ class GuiTests(unittest.TestCase):
             root.withdraw()
             try:
                 app = gui.CaptionApp(root, store)
+                app._set_system_prompt("单元测试系统提示词")
                 app.folder_var.set(str(root_path))
                 app.media_mode_var.set("video")
                 app.caption_style_var.set("phrases")
@@ -129,6 +168,7 @@ class GuiTests(unittest.TestCase):
             root.withdraw()
             app = gui.CaptionApp(root, self._store(root_path), show_splash=False)
             try:
+                app._set_system_prompt("单元测试系统提示词")
                 app.folder_var.set(str(root_path))
                 app.backend_var.set("local")
                 app.local_model_var.set(str(model_folder))
@@ -270,6 +310,7 @@ class GuiTests(unittest.TestCase):
             root.withdraw()
             app = gui.CaptionApp(root, store)
             try:
+                app._set_system_prompt("单元测试系统提示词")
                 app.folder_var.set(str(root_path))
                 app._handle_scan(core.scan_media(root_path, "image"))
                 app._gallery_selected(first, False)
@@ -481,6 +522,361 @@ class GuiTests(unittest.TestCase):
                 root.update_idletasks()
                 app.close()
 
+    def test_prompt_form_scrollbar_only_moves_the_three_prompt_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.geometry("1080x720+20+20")
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            try:
+                app.show_workspace()
+                app.right_tabs.select(app.preview_tab)
+                app.inspector_tabs.select(app.prompt_tab)
+                root.update_idletasks()
+                root.update()
+
+                self.assertEqual(
+                    "right", app.prompt_form_scrollbar.pack_info()["side"]
+                )
+                self.assertIs(
+                    app.prompt_scroll_host, app.prompt_form_canvas.master
+                )
+                self.assertIs(
+                    app.prompt_form_content, app.prompt_subject_row.master
+                )
+                self.assertIs(
+                    app.prompt_form_content, app.user_prompt_text.frame.master
+                )
+                self.assertIs(
+                    app.prompt_form_content, app.system_prompt_text.frame.master
+                )
+                self.assertIs(app.prompt_tab, app.preset_box.master.master)
+
+                scrollregion = tuple(
+                    float(value)
+                    for value in str(
+                        app.prompt_form_canvas.cget("scrollregion")
+                    ).split()
+                )
+                self.assertGreater(
+                    scrollregion[3] - scrollregion[1],
+                    app.prompt_form_canvas.winfo_height(),
+                )
+                toolbar_y = app.preset_box.master.winfo_rooty()
+                subject_y = app.prompt_subject_row.winfo_rooty()
+                task_settings_view = app.task_settings_canvas.yview()
+
+                app.prompt_form_canvas.yview_moveto(1.0)
+                root.update_idletasks()
+                root.update()
+
+                self.assertEqual(toolbar_y, app.preset_box.master.winfo_rooty())
+                self.assertLess(app.prompt_subject_row.winfo_rooty(), subject_y)
+                self.assertEqual(
+                    task_settings_view, app.task_settings_canvas.yview()
+                )
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_prompt_preset_uses_modern_themed_modal_and_saves_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.geometry("1200x800+40+40")
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            dialog = None
+            try:
+                app.show_workspace()
+                app.system_prompt_text.delete("1.0", tk.END)
+                app.system_prompt_text.insert("1.0", "专业人物训练提示词")
+                root.update_idletasks()
+                root.update()
+
+                with mock.patch.object(gui.simpledialog, "askstring") as legacy:
+                    dialog = app.save_preset()
+                root.update_idletasks()
+                root.update()
+
+                self.assertIsNotNone(dialog)
+                legacy.assert_not_called()
+                self.assertTrue(bool(dialog.overrideredirect()))
+                self.assertEqual("Surface.TFrame", dialog.qianyi_shell.cget("style"))
+                self.assertEqual(
+                    "Primary.TButton",
+                    dialog.qianyi_save_button.cget("style"),
+                )
+                self.assertEqual("取消", dialog.qianyi_cancel_button.cget("text"))
+                self.assertEqual("保存预设", dialog.qianyi_save_button.cget("text"))
+
+                expected_x = (
+                    root.winfo_rootx()
+                    + (root.winfo_width() - dialog.winfo_width()) // 2
+                )
+                expected_y = (
+                    root.winfo_rooty()
+                    + (root.winfo_height() - dialog.winfo_height()) // 2
+                )
+                self.assertLessEqual(abs(dialog.winfo_rootx() - expected_x), 2)
+                self.assertLessEqual(abs(dialog.winfo_rooty() - expected_y), 2)
+
+                dialog.qianyi_save_button.invoke()
+                root.update()
+                self.assertTrue(dialog.winfo_exists())
+                self.assertEqual(
+                    "请输入预设名称",
+                    dialog.qianyi_feedback_label.cget("text"),
+                )
+
+                dialog.qianyi_name_var.set("人物精修")
+                root.update()
+                dialog.qianyi_save_button.invoke()
+                root.update()
+
+                self.assertFalse(dialog.winfo_exists())
+                self.assertEqual("人物精修", app.preset_var.get())
+                self.assertEqual(
+                    "专业人物训练提示词",
+                    app.settings["prompt_presets"]["人物精修"],
+                )
+            finally:
+                if dialog is not None:
+                    try:
+                        if dialog.winfo_exists():
+                            dialog.destroy()
+                    except tk.TclError:
+                        pass
+                root.update_idletasks()
+                app.close()
+
+    def test_video_navigation_is_prominent_and_switches_workflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, self._store(root_path), show_splash=False)
+            try:
+                app.folder_var.set(str(root_path))
+                app.show_workspace()
+                root.geometry("900x680+80+60")
+                root.update_idletasks()
+                before = root.geometry()
+                with mock.patch.object(app, "_restore_main_window") as restore:
+                    with mock.patch.object(app, "scan_project") as scan:
+                        app.select_workflow("video")
+                        app.show_sampling_panel()
+                self.assertEqual("video", app.media_mode_var.get())
+                self.assertEqual("视频反推", app.workflow_mode_var.get())
+                self.assertEqual("开始视频反推", app.start_button.cget("text"))
+                scan.assert_called_once()
+                restore.assert_not_called()
+                root.update_idletasks()
+                self.assertEqual(before, root.geometry())
+                self.assertEqual(
+                    str(app.task_settings_tab), app.right_tabs.select()
+                )
+                self.assertEqual("pack", app.sampling_shell.winfo_manager())
+                self.assertEqual("pack", app.sampling_body.winfo_manager())
+                self.assertTrue(app.sampling_expanded)
+                self.assertNotIn("sampling", app.nav_buttons)
+                self.assertIn("platform", app.nav_buttons)
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_provider_and_sampling_snapshot_reaches_batch_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            store = self._store(root_path)
+            store.set_api_key("qwen-key", "qwen")
+            captured = {}
+            finished = threading.Event()
+
+            class FakeRunner:
+                def __init__(self, callback):
+                    self.running = False
+
+                def run(self, **kwargs):
+                    captured.update(kwargs)
+                    finished.set()
+
+                def cancel(self):
+                    pass
+
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, store, show_splash=False)
+            try:
+                app._set_system_prompt("单元测试系统提示词")
+                app.folder_var.set(str(root_path))
+                app.provider_label_var.set(core.API_PROVIDERS["qwen"].label)
+                app._provider_changed()
+                app.model_label_var.set("qwen3-vl-plus")
+                app.max_tokens_var.set(1400)
+                app.temperature_var.set(0.55)
+                app.top_p_var.set(0.75)
+                app.top_k_var.set(32)
+                app.seed_var.set("123")
+                with mock.patch.object(gui, "BatchRunner", FakeRunner):
+                    app.start_task()
+                    deadline = time.monotonic() + 2
+                    while not finished.is_set() and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+                self.assertTrue(finished.is_set())
+                self.assertEqual("qwen", captured["provider_key"])
+                self.assertEqual("qwen3-vl-plus", captured["api_model"])
+                self.assertEqual(
+                    core.API_PROVIDERS["qwen"].chat_url,
+                    captured["api_endpoint"],
+                )
+                self.assertEqual(1400, captured["sampling"]["max_tokens"])
+                self.assertEqual(0.55, captured["sampling"]["temperature"])
+                self.assertEqual(32, captured["sampling"]["top_k"])
+                self.assertEqual(123, captured["sampling"]["seed"])
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_platform_config_uses_public_providers_and_built_in_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            dialog = None
+            try:
+                app.provider_label_var.set(core.API_PROVIDERS["openai"].label)
+                app._provider_changed()
+                self.assertEqual("readonly", str(app.model_box.cget("state")))
+                self.assertIn("gpt-5.6-sol", app.model_box.cget("values"))
+                self.assertIn("gpt-5.5", app.model_box.cget("values"))
+                self.assertIn("gpt-4.1", app.model_box.cget("values"))
+                self.assertEqual("readonly", str(app.endpoint_box.cget("state")))
+                self.assertEqual(
+                    core.API_PROVIDERS["openai"].chat_url,
+                    app.custom_endpoint_var.get(),
+                )
+                self.assertEqual("", app.endpoint_box.winfo_manager())
+
+                def descendants(widget):
+                    for child in widget.winfo_children():
+                        yield child
+                        yield from descendants(child)
+
+                dialog = app.open_platform_config()
+                controls = list(descendants(dialog))
+                self.assertEqual("平台设置", dialog.title())
+                provider_box = next(
+                    widget
+                    for widget in controls
+                    if isinstance(widget, ttk.Combobox)
+                    and core.API_PROVIDERS["openai"].label in widget.cget("values")
+                )
+                self.assertNotIn(
+                    core.API_PROVIDERS["custom"].label,
+                    provider_box.cget("values"),
+                )
+                for provider_key in ("google", "moonshot", "qwen", "siliconflow"):
+                    self.assertIn(
+                        core.API_PROVIDERS[provider_key].label,
+                        provider_box.cget("values"),
+                    )
+                self.assertNotIn("MiniMax", provider_box.cget("values"))
+                self.assertNotIn("OpenRouter", provider_box.cget("values"))
+                self.assertEqual(
+                    {*gui.PUBLIC_PROVIDER_KEYS, "connection"},
+                    set(app.provider_icons),
+                )
+                labels = [
+                    str(widget.cget("text"))
+                    for widget in controls
+                    if isinstance(widget, ttk.Label)
+                ]
+                for label in (
+                    "输出格式", "输出语言", "运行后端",
+                    "本地模型目录",
+                ):
+                    self.assertIn(label, labels)
+                self.assertIn("Base URL", labels)
+                self.assertTrue(any("系统已内置" in value for value in labels))
+                workspace_labels = [
+                    str(widget.cget("text"))
+                    for widget in descendants(app.workspace_frame)
+                    if isinstance(widget, ttk.Label)
+                    and widget.winfo_manager()
+                ]
+                for moved_label in ("输出", "后端", "语言", "本地模型目录"):
+                    self.assertNotIn(moved_label, workspace_labels)
+                portal = next(
+                    widget
+                    for widget in controls
+                    if isinstance(widget, ttk.Button)
+                    and "前往" in str(widget.cget("text"))
+                )
+                with mock.patch.object(gui.webbrowser, "open", return_value=True) as opened:
+                    portal.invoke()
+                opened.assert_called_once_with(
+                    gui.API_KEY_PORTALS["openai"][1], new=2
+                )
+
+                radio_buttons = [
+                    widget for widget in controls
+                    if isinstance(widget, ttk.Radiobutton)
+                ]
+                next(
+                    widget for widget in radio_buttons
+                    if widget.cget("text") == "词组标签"
+                ).invoke()
+                next(
+                    widget for widget in radio_buttons
+                    if widget.cget("text") == "English"
+                ).invoke()
+                next(
+                    widget for widget in radio_buttons
+                    if widget.cget("text") == "本地模型"
+                ).invoke()
+                local_entry = next(
+                    widget for widget in controls
+                    if type(widget) is ttk.Entry
+                    and widget.cget("show") == ""
+                )
+                self.assertEqual("normal", str(local_entry.cget("state")))
+                local_entry.insert(0, r"D:\Models\Vision")
+                save_button = next(
+                    widget for widget in controls
+                    if isinstance(widget, ttk.Button)
+                    and widget.cget("text") == "保存设置"
+                )
+                save_button.invoke()
+                self.assertEqual("phrases", app.caption_style_var.get())
+                self.assertEqual("en", app.output_language_var.get())
+                self.assertEqual("local", app.backend_var.get())
+                self.assertEqual(r"D:\Models\Vision", app.local_model_var.get())
+                self.assertEqual(
+                    r"D:\Models\Vision", app.settings["local_model_folder"]
+                )
+                dialog = None
+            finally:
+                if dialog is not None and dialog.winfo_exists():
+                    dialog.destroy()
+                root.update_idletasks()
+                app.close()
+
+    def test_hardware_monitor_formats_nonblocking_sample(self):
+        monitor = gui.HardwareMonitor(interval=0.5)
+        with mock.patch.object(monitor, "_cpu_percent", return_value=23.4):
+            with mock.patch.object(monitor, "_memory_text", return_value="内存 8.0/16.0 GB"):
+                with mock.patch.object(monitor, "_query_gpu", return_value="GPU 40% · 100/1000 MB"):
+                    value = monitor.sample()
+        self.assertEqual(
+            "CPU 23%  |  内存 8.0/16.0 GB  |  GPU 40% · 100/1000 MB",
+            value,
+        )
+
     def test_settings_masks_and_fully_clears_saved_api_key(self):
         with tempfile.TemporaryDirectory() as directory:
             root_path = Path(directory)
@@ -496,7 +892,11 @@ class GuiTests(unittest.TestCase):
 
                 dialog = app.open_settings()
                 controls = list(descendants(dialog))
-                entry = next(widget for widget in controls if isinstance(widget, ttk.Entry))
+                entry = next(
+                    widget
+                    for widget in controls
+                    if type(widget) is ttk.Entry and widget.cget("show") == "•"
+                )
                 clear = next(
                     widget
                     for widget in controls
@@ -518,7 +918,11 @@ class GuiTests(unittest.TestCase):
                 dialog.destroy()
                 dialog = app.open_settings()
                 controls = list(descendants(dialog))
-                entry = next(widget for widget in controls if isinstance(widget, ttk.Entry))
+                entry = next(
+                    widget
+                    for widget in controls
+                    if type(widget) is ttk.Entry and widget.cget("show") == "•"
+                )
                 self.assertEqual("", entry.get())
             finally:
                 if dialog is not None and dialog.winfo_exists():
@@ -534,35 +938,486 @@ class GuiTests(unittest.TestCase):
             try:
                 self.assertEqual("芊熠智能打标工作台", gui.APP_TITLE)
                 self.assertIn(gui.APP_TITLE, root.title())
-                self.assertTrue(gui.resource_path("assets/launch-im-aios.jpg").is_file())
                 self.assertTrue(gui.resource_path("assets/launch-qianyi.png").is_file())
                 self.assertTrue(gui.resource_path("assets/qianyi-app-icon.png").is_file())
                 self.assertTrue(gui.resource_path("assets/qianyi-app.ico").is_file())
-                self.assertIsNotNone(app._launch_source)
-                self.assertIsNotNone(app._project_banner_source)
+                for theme_key in ("night", "day"):
+                    for icon_key in (
+                        "project", "image", "video", "platform", "system",
+                        "night", "day"
+                    ):
+                        icon_path = gui.resource_path(
+                            f"assets/nav-icons/{theme_key}/{icon_key}.png"
+                        )
+                        self.assertTrue(icon_path.is_file())
+                        with Image.open(icon_path) as icon:
+                            self.assertEqual("RGBA", icon.mode)
+                            self.assertEqual((30, 30), icon.size)
+                            self.assertEqual((0, 255), icon.getchannel("A").getextrema())
+                for provider_key in (*gui.PUBLIC_PROVIDER_KEYS, "connection"):
+                    icon_path = gui.resource_path(
+                        f"assets/provider-icons/{provider_key}.png"
+                    )
+                    self.assertTrue(icon_path.is_file())
+                    with Image.open(icon_path) as icon:
+                        self.assertEqual((32, 32), icon.size)
                 self.assertIsNotNone(app._app_icon_photo)
+                self.assertEqual("#090d1d", app.launch_frame.cget("background"))
+                self.assertEqual((640, 360), app._compose_launch_background(640, 360).size)
+                self.assertEqual(
+                    ("正在加载视觉工作台", "正在加载界面与视觉资源"),
+                    app._launch_status_copy(),
+                )
+                app.launch_progress = 80
+                self.assertEqual(
+                    ("工作台即将就绪", "正在完成最后的启动检查"),
+                    app._launch_status_copy(),
+                )
+                app._render_launch(SimpleNamespace(width=1180, height=680))
+                launch_text = "\n".join(
+                    str(app.launch_canvas.itemcget(item, "text"))
+                    for item in app.launch_canvas.find_all()
+                    if app.launch_canvas.type(item) == "text"
+                )
+                self.assertIn(gui.APP_TITLE, launch_text)
+                self.assertIn("工作台即将就绪", launch_text)
                 self.assertIn(
                     core.MODELS["seed-2.1-pro-turbo"].label,
                     app.model_box["values"],
                 )
-                banner = app._compose_project_banner(960, 176)
-                self.assertIsNotNone(banner)
-                self.assertEqual((960, 176), banner.size)
-                background = Image.new("RGB", (960, 1), gui.COLORS["bg"])
-                self.assertIsNone(
-                    ImageChops.difference(
-                        banner.crop((0, 175, 960, 176)), background
-                    ).getbbox()
+                self.assertFalse(hasattr(app, "project_banner"))
+                self.assertEqual("night", app.theme_key)
+                self.assertEqual(gui.THEMES["night"]["bg"], gui.COLORS["bg"])
+                project_center_buttons = [
+                    str(widget.cget("text"))
+                    for widget in app.project_center_frame.winfo_children()[0].winfo_children()
+                    for widget in widget.winfo_children()
+                    if isinstance(widget, ttk.Button)
+                ]
+                self.assertNotIn("平台设置", project_center_buttons)
+                self.assertNotIn("系统说明", project_center_buttons)
+                self.assertEqual("项目中心", app.nav_buttons["project"].cget("text"))
+                self.assertEqual("系统说明", app.nav_buttons["system"].cget("text"))
+                self.assertIs(app.workspace_nav, app.nav_buttons["project"].master)
+                self.assertEqual("left", app.workspace_nav.pack_info()["side"])
+                self.assertEqual(
+                    ["当前素材", "任务设置"],
+                    [app.right_tabs.tab(tab, "text") for tab in app.right_tabs.tabs()],
                 )
-                app._render_project_banner()
-                banner_text = "\n".join(
-                    str(app.project_banner.itemcget(item, "text"))
-                    for item in app.project_banner.find_all()
-                    if app.project_banner.type(item) == "text"
+                self.assertEqual(
+                    ["标注结果", "提示词", "运行日志"],
+                    [
+                        app.inspector_tabs.tab(tab, "text")
+                        for tab in app.inspector_tabs.tabs()
+                    ],
                 )
-                self.assertNotIn("MEDIA CAPTION TOOL", banner_text)
+                self.assertFalse(app.sampling_expanded)
+                self.assertEqual("", app.sampling_body.winfo_manager())
+                app._layout_filter_bar(620)
+                self.assertEqual(1, app.filter_box.grid_info()["row"])
+                self.assertEqual(0, app.search_entry.grid_info()["row"])
+                app.show_system_info()
+                self.assertEqual("pack", app.system_info_frame.winfo_manager())
+                topbar_buttons = [
+                    str(widget.cget("text"))
+                    for widget in app.system_info_frame.winfo_children()[0].winfo_children()
+                    for widget in widget.winfo_children()
+                    if isinstance(widget, ttk.Button)
+                ]
+                self.assertNotIn("检查更新", topbar_buttons)
+                self.assertIn(f"v{core.APP_VERSION}", app.system_update_state_var.get())
+                app._apply_release_to_system_info({
+                    "tag": "v3.4",
+                    "notes": "旧版本说明",
+                    "published_at": "2026-08-08T03:07:26Z",
+                    "is_newer": False,
+                })
+                self.assertIn(
+                    gui.RELEASE_NOTES[0],
+                    app.system_release_notes.get("1.0", tk.END),
+                )
+                self.assertNotIn(
+                    "旧版本说明", app.system_release_notes.get("1.0", tk.END)
+                )
+                self.assertEqual("", app.system_release_date_var.get())
+                app._show_update_banner({
+                    "tag": "v99.0",
+                    "url": "https://github.com/example/releases/tag/v99.0",
+                    "notes": "测试更新",
+                    "is_newer": True,
+                })
+                self.assertTrue(app.update_banner_visible)
+                self.assertIn("v99.0", app.update_banner_var.get())
+                app.dismiss_update_banner()
+                self.assertFalse(app.update_banner_visible)
+                app.show_workspace()
+                self.assertEqual(
+                    (str(app.toolbar_icons["night"]["image"]),),
+                    app.nav_buttons["image"].cget("image"),
+                )
+                app._set_theme("day")
+                self.assertEqual("day", app.theme_key)
+                self.assertEqual("day", app.settings["theme"])
+                self.assertEqual(gui.THEMES["day"]["bg"], gui.COLORS["bg"])
+                self.assertEqual(
+                    (str(app.toolbar_icons["day"]["image"]),),
+                    app.nav_buttons["image"].cget("image"),
+                )
+                self.assertEqual(
+                    gui.COLORS["media_bg"], app.preview_label.cget("background")
+                )
+                for text_widget in (
+                    app.result_text,
+                    app.user_prompt_text,
+                    app.system_prompt_text,
+                    app.log_text,
+                ):
+                    self.assertEqual(
+                        gui.THEMES["day"]["input_bg"],
+                        text_widget.cget("background"),
+                    )
+                    self.assertEqual(
+                        gui.THEMES["day"]["input_border"],
+                        text_widget.cget("highlightbackground"),
+                    )
+                self.assertEqual(
+                    gui.THEMES["day"]["input_readonly"],
+                    app.system_release_notes.cget("background"),
+                )
+                self.assertEqual(
+                    "disabled", str(app.system_release_notes.cget("state"))
+                )
+                app._set_release_notes("主题回归测试")
+                self.assertEqual(
+                    gui.THEMES["day"]["input_readonly"],
+                    app.system_release_notes.cget("background"),
+                )
+                for theme_key in ("night", "day", "night", "day"):
+                    app._set_theme(theme_key)
+                    root.update_idletasks()
+                    for text_widget in (
+                        app.result_text,
+                        app.user_prompt_text,
+                        app.system_prompt_text,
+                        app.log_text,
+                    ):
+                        self.assertEqual(
+                            gui.THEMES[theme_key]["input_bg"],
+                            text_widget.cget("background"),
+                        )
+                    self.assertEqual(
+                        gui.THEMES[theme_key]["input_readonly"],
+                        app.system_release_notes.cget("background"),
+                    )
+                self.assertEqual(5, len(app._themed_text_widgets))
+                app.user_prompt_text.configure(
+                    background=gui.THEMES["night"]["input_bg"]
+                )
+                app.system_prompt_text.configure(
+                    background=gui.THEMES["night"]["input_bg"]
+                )
+                app.log_text.configure(
+                    background=gui.THEMES["night"]["input_bg"]
+                )
+                # Selecting the already active theme must repair stale native colors.
+                app._set_theme("day")
+                for text_widget in (
+                    app.user_prompt_text,
+                    app.system_prompt_text,
+                    app.log_text,
+                ):
+                    self.assertEqual(
+                        gui.THEMES["day"]["input_bg"],
+                        text_widget.cget("background"),
+                    )
+                for index in range(12):
+                    theme_key = "night" if index % 2 == 0 else "day"
+                    app.inspector_tabs.select(
+                        app.result_tab if index % 3 else app.prompt_tab
+                    )
+                    app._set_theme(theme_key)
+                    app.user_prompt_text.configure(background="#010203")
+                    app.system_prompt_text.configure(background="#010203")
+                    app.log_text.configure(background="#010203")
+                    app._schedule_theme_sync()
+                    deadline = time.monotonic() + 0.25
+                    while time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+                    for text_widget in (
+                        app.result_text,
+                        app.user_prompt_text,
+                        app.system_prompt_text,
+                        app.log_text,
+                    ):
+                        self.assertEqual(
+                            gui.THEMES[theme_key]["input_bg"],
+                            text_widget.cget("background"),
+                        )
+                    self.assertEqual(
+                        gui.THEMES[theme_key]["input_readonly"],
+                        app.system_release_notes.cget("background"),
+                    )
+                app._set_theme("day")
+                style = ttk.Style(root)
+                self.assertEqual(
+                    gui.THEMES["day"]["input_bg"],
+                    style.lookup("TEntry", "fieldbackground"),
+                )
+                self.assertEqual(
+                    gui.THEMES["day"]["input_readonly"],
+                    style.lookup("TCombobox", "fieldbackground", ("readonly",)),
+                )
+                self.assertIn(
+                    "RoundedForm.field", style.layout("TEntry")[0][0]
+                )
+                self.assertIn(
+                    "RoundedForm.field", style.layout("TCombobox")[0][0]
+                )
+                self.assertIn(
+                    "RoundedForm.field", style.layout("TSpinbox")[0][0]
+                )
+                self.assertTrue(
+                    all(
+                        button.cget("style") == "ThemeActive.TButton"
+                        for button in app.theme_buttons["day"]
+                    )
+                )
+                tooltip = app.nav_tooltips[2]
+                tooltip.show()
+                tooltip_label = tooltip.window.winfo_children()[0]
+                self.assertEqual(
+                    gui.COLORS["surface_alt"], tooltip_label.cget("background")
+                )
+                self.assertEqual(
+                    gui.COLORS["text"], tooltip_label.cget("foreground")
+                )
+                tooltip.hide()
+                app.show_project_center()
                 self.assertEqual("", app.launch_frame.winfo_manager())
                 self.assertEqual("pack", app.project_center_frame.winfo_manager())
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_rendered_native_text_colors_survive_theme_and_view_roundtrips(self):
+        def rgb(value: str) -> tuple[int, int, int]:
+            normalized = value.removeprefix("#")
+            return tuple(
+                int(normalized[index:index + 2], 16) for index in (0, 2, 4)
+            )
+
+        def dominant_screen_color(root: tk.Tk, widget: tk.Widget) -> tuple[int, int, int]:
+            screen = ImageGrab.grab(window=root.winfo_id()).convert("RGB")
+            scale_x = screen.width / max(1, root.winfo_width())
+            scale_y = screen.height / max(1, root.winfo_height())
+            inset = 14
+            left = round(
+                (widget.winfo_rootx() - root.winfo_rootx() + inset) * scale_x
+            )
+            top = round(
+                (widget.winfo_rooty() - root.winfo_rooty() + inset) * scale_y
+            )
+            right = round(
+                (
+                    widget.winfo_rootx()
+                    - root.winfo_rootx()
+                    + widget.winfo_width()
+                    - inset
+                )
+                * scale_x
+            )
+            bottom = round(
+                (
+                    widget.winfo_rooty()
+                    - root.winfo_rooty()
+                    + widget.winfo_height()
+                    - inset
+                )
+                * scale_y
+            )
+            sample = screen.crop((left, top, right, bottom))
+            pixels = (
+                sample.get_flattened_data()
+                if hasattr(sample, "get_flattened_data")
+                else sample.getdata()
+            )
+            return Counter(pixels).most_common(1)[0][0]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.geometry("1400x900+20+20")
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            try:
+                app.show_workspace()
+                app.inspector_tabs.select(app.result_tab)
+                app._set_theme("day")
+                app.result_text.configure(
+                    background=gui.THEMES["night"]["input_bg"]
+                )
+                app.result_text.frame.configure(
+                    background=gui.THEMES["night"]["input_bg"]
+                )
+                app.show_project_center()
+                app.show_workspace()
+                app.inspector_tabs.select(app.result_tab)
+                deadline = time.monotonic() + 0.35
+                while time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.01)
+                self.assertEqual(
+                    rgb(gui.THEMES["day"]["input_bg"]),
+                    dominant_screen_color(root, app.result_text),
+                )
+                self.assertEqual(
+                    gui.THEMES["day"]["input_bg"],
+                    app.result_text.frame.cget("background"),
+                )
+
+                app.show_system_info()
+                app._set_theme("night")
+                app.system_release_notes.configure(
+                    background=gui.THEMES["day"]["input_readonly"]
+                )
+                app.system_release_notes.frame.configure(
+                    background=gui.THEMES["day"]["input_readonly"]
+                )
+                app._set_release_notes("主题渲染回归测试")
+                deadline = time.monotonic() + 0.35
+                while time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.01)
+                self.assertEqual(
+                    rgb(gui.THEMES["night"]["input_readonly"]),
+                    dominant_screen_color(root, app.system_release_notes),
+                )
+                self.assertEqual(
+                    gui.THEMES["night"]["input_readonly"],
+                    app.system_release_notes.frame.cget("background"),
+                )
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_task_settings_scroll_keeps_seed_visible_and_uses_soft_borders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.geometry("1080x720+20+20")
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            try:
+                app.show_workspace()
+                app.right_tabs.select(app.task_settings_tab)
+                app._toggle_sampling_panel(True)
+                deadline = time.monotonic() + 0.25
+                while time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.01)
+
+                self.assertEqual(
+                    "right", app.task_settings_scrollbar.pack_info()["side"]
+                )
+                scrollregion = tuple(
+                    float(value)
+                    for value in str(
+                        app.task_settings_canvas.cget("scrollregion")
+                    ).split()
+                )
+                self.assertGreater(
+                    scrollregion[3] - scrollregion[1],
+                    app.task_settings_canvas.winfo_height(),
+                )
+                app.task_settings_canvas.yview_moveto(1.0)
+                root.update_idletasks()
+                root.update()
+                canvas_top = app.task_settings_canvas.winfo_rooty()
+                canvas_bottom = (
+                    canvas_top + app.task_settings_canvas.winfo_height()
+                )
+                seed_top = app.seed_entry.winfo_rooty()
+                seed_bottom = seed_top + app.seed_entry.winfo_height()
+                self.assertGreaterEqual(seed_top, canvas_top)
+                self.assertLessEqual(seed_bottom, canvas_bottom)
+                self.assertEqual(
+                    "SectionCard.TFrame", app.format_card.cget("style")
+                )
+                self.assertEqual(
+                    "SectionCard.TFrame", app.strategy_card.cget("style")
+                )
+
+                style = ttk.Style(root)
+                for theme_key in ("day", "night"):
+                    app._set_theme(theme_key)
+                    root.update_idletasks()
+                    self.assertEqual(
+                        0, int(style.lookup("TNotebook", "borderwidth"))
+                    )
+                    self.assertEqual(
+                        gui.THEMES[theme_key]["border"],
+                        style.lookup("TLabelframe", "bordercolor"),
+                    )
+                    self.assertEqual(
+                        gui.THEMES[theme_key]["border"],
+                        style.lookup("TNotebook.Tab", "lightcolor"),
+                    )
+                    self.assertEqual(
+                        gui.THEMES[theme_key]["accent"],
+                        style.lookup(
+                            "Surface.TRadiobutton",
+                            "indicatorcolor",
+                            ("selected",),
+                        ),
+                    )
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_form_controls_ignore_mousewheel_without_blocking_inspector_scroll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.geometry("1080x720+20+20")
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            try:
+                app.show_workspace()
+                app.right_tabs.select(app.task_settings_tab)
+                app._toggle_sampling_panel(True)
+                root.update_idletasks()
+                root.update()
+
+                app.focus_box.current(1)
+                focus_before = app.focus_box.get()
+                app.concurrency_var.set(3)
+                concurrency_before = app.concurrency_var.get()
+                app.sampling_preset_box.current(1)
+                preset_before = app.sampling_preset_box.get()
+                temperature = app.sampling_control_widgets["Temperature"]
+                app.temperature_var.set(0.7)
+                temperature_before = app.temperature_var.get()
+
+                with mock.patch.object(
+                    app,
+                    "_task_settings_mousewheel",
+                    wraps=app._task_settings_mousewheel,
+                ) as inspector_scroll:
+                    for widget in (
+                        app.focus_box,
+                        app.concurrency_box,
+                        app.sampling_preset_box,
+                        temperature,
+                    ):
+                        widget.event_generate("<MouseWheel>", delta=-120)
+                        root.update()
+
+                self.assertEqual(focus_before, app.focus_box.get())
+                self.assertEqual(concurrency_before, app.concurrency_var.get())
+                self.assertEqual(preset_before, app.sampling_preset_box.get())
+                self.assertEqual(temperature_before, app.temperature_var.get())
+                self.assertEqual(4, inspector_scroll.call_count)
             finally:
                 root.update_idletasks()
                 app.close()

@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+import zipfile
 
 from PIL import Image
 from pillow_heif import from_pillow
@@ -37,6 +38,219 @@ class MemorySecretStore(core.SecretStore):
 
 
 class CoreTests(unittest.TestCase):
+    def test_public_defaults_contain_no_private_api_or_prompt_data(self):
+        self.assertEqual({}, core.DEFAULT_SETTINGS["api_models"])
+        self.assertEqual({}, core.DEFAULT_SETTINGS["api_endpoints"])
+        self.assertEqual("", core.DEFAULT_SETTINGS["custom_api_endpoint"])
+        self.assertEqual("", core.DEFAULT_SETTINGS["user_prompt"])
+        self.assertEqual("", core.DEFAULT_SETTINGS["selected_preset"])
+        self.assertEqual({}, core.DEFAULT_SETTINGS["prompt_presets"])
+
+    def test_github_release_version_comparison_and_payload(self):
+        self.assertEqual((3, 10, 2), core.version_tuple("release-v3.10.2"))
+        self.assertTrue(core.is_newer_version("v3.6", "3.5"))
+        self.assertFalse(core.is_newer_version("v3.5.0", "3.5"))
+        self.assertFalse(core.is_newer_version("invalid", "3.5"))
+
+        transport = core.HttpTransport(
+            lambda method, url, **kwargs: FakeResponse(
+                payload={
+                    "tag_name": "v3.6",
+                    "name": "芊熠智能打标工作台 v3.6",
+                    "html_url": "https://github.com/example/releases/tag/v3.6",
+                    "published_at": "2026-08-13T10:00:00Z",
+                    "body": "- 新增更新检查",
+                    "assets": [{
+                        "name": "Qianyi-v3.6-Windows-x64.zip",
+                        "browser_download_url": (
+                            "https://github.com/example/releases/download/v3.6/"
+                            "Qianyi-v3.6-Windows-x64.zip"
+                        ),
+                        "size": 1234,
+                        "digest": "sha256:" + "a" * 64,
+                        "content_type": "application/zip",
+                    }],
+                }
+            )
+        )
+        with mock.patch.object(core, "APP_VERSION", "3.5"):
+            release = core.check_latest_release(transport)
+        self.assertTrue(release["is_newer"])
+        self.assertEqual("v3.6", release["tag"])
+        self.assertIn("更新检查", release["notes"])
+        self.assertEqual("Qianyi-v3.6-Windows-x64.zip", release["windows_asset"]["name"])
+        self.assertEqual("a" * 64, release["windows_asset"]["sha256"])
+
+    def test_openai_compatible_provider_routes_model_and_supported_sampling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+            calls = []
+
+            def sender(method, url, **kwargs):
+                calls.append((method, url, kwargs))
+                return FakeResponse(
+                    payload={"choices": [{"message": {"content": "caption"}}]}
+                )
+
+            client = core.CaptionClient(
+                core.MODELS[core.DEFAULT_MODEL_KEY],
+                "router-key",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+                provider_key="openai",
+                api_model="gpt-4.1",
+                sampling={
+                    "max_tokens": 900,
+                    "temperature": 0.35,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "frequency_penalty": 0.2,
+                    "presence_penalty": 0.1,
+                    "seed": 7,
+                },
+            )
+
+            self.assertEqual("caption", client.caption_image(image_path, "prompt"))
+            payload = calls[0][2]["json"]
+            self.assertEqual(core.API_PROVIDERS["openai"].chat_url, calls[0][1])
+            self.assertEqual("gpt-4.1", payload["model"])
+            self.assertEqual(900, payload["max_tokens"])
+            self.assertEqual(7, payload["seed"])
+            self.assertNotIn("top_k", payload)
+
+    def test_openai_gpt5_uses_completion_tokens_and_no_reasoning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+            calls = []
+
+            def sender(method, url, **kwargs):
+                calls.append((method, url, kwargs))
+                return FakeResponse(
+                    payload={"choices": [{"message": {"content": "caption"}}]}
+                )
+
+            client = core.CaptionClient(
+                core.MODELS[core.DEFAULT_MODEL_KEY],
+                "openai-key",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+                provider_key="openai",
+                api_model="gpt-5.6-terra",
+                sampling={"max_tokens": 1800},
+            )
+
+            self.assertEqual("caption", client.caption_image(image_path, "prompt"))
+            payload = calls[0][2]["json"]
+            self.assertEqual(1800, payload["max_completion_tokens"])
+            self.assertEqual("none", payload["reasoning_effort"])
+            self.assertNotIn("max_tokens", payload)
+
+    def test_current_provider_registry_contains_requested_visual_models(self):
+        expected = {
+            "google": (
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "gemini-3.6-flash",
+            ),
+            "moonshot": (
+                "https://api.moonshot.cn/v1/chat/completions",
+                "kimi-k2.6",
+            ),
+            "qwen": (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                "qwen3-vl-plus",
+            ),
+            "siliconflow": (
+                "https://api.siliconflow.cn/v1/chat/completions",
+                "zai-org/GLM-4.6V",
+            ),
+        }
+        for provider_key, (url, model) in expected.items():
+            provider = core.API_PROVIDERS[provider_key]
+            self.assertEqual(url, provider.chat_url)
+            self.assertEqual(model, provider.default_model)
+            self.assertIn(model, provider.model_suggestions)
+        self.assertIn("gpt-5.6-sol", core.API_PROVIDERS["openai"].model_suggestions)
+        self.assertIn("gpt-5.5", core.API_PROVIDERS["openai"].model_suggestions)
+        self.assertIn("minimax-m3", core.MODELS)
+        self.assertEqual(core.CODING_CHAT_URL, core.MODELS["minimax-m3"].chat_url)
+        self.assertNotIn("minimax", core.API_PROVIDERS)
+        self.assertNotIn("openrouter", core.API_PROVIDERS)
+
+    def test_provider_connection_uses_non_generating_models_endpoint(self):
+        calls = []
+
+        def sender(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return FakeResponse(payload={"data": []})
+
+        result = core.test_provider_connection(
+            "openai", "test-key", core.HttpTransport(sender)
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("GET", calls[0][0])
+        self.assertEqual(core.PROVIDER_TEST_URLS["openai"], calls[0][1])
+        self.assertEqual("Bearer test-key", calls[0][2]["headers"]["Authorization"])
+
+    def test_update_package_extracts_valid_executable_and_writes_updater(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "Qianyi-Windows-x64.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("Qianyi/README.txt", "notes")
+                archive.writestr("Qianyi/MediaCaptionTool.exe", b"MZ" + b"x" * 128)
+            extracted = core.extract_update_executable(package, root / "payload")
+            self.assertEqual(b"MZ", extracted.read_bytes()[:2])
+            installed = root / "installed" / "MediaCaptionTool.exe"
+            installed.parent.mkdir()
+            installed.write_bytes(b"MZold")
+            script = core.create_windows_update_script(
+                extracted, installed, 12345, root / "updater"
+            )
+            script_text = script.read_text(encoding="utf-8-sig")
+            self.assertIn("Wait-Process -Id 12345", script_text)
+            self.assertIn("Copy-Item -LiteralPath", script_text)
+
+    def test_custom_endpoint_and_sampling_values_are_normalized(self):
+        self.assertEqual(
+            "http://127.0.0.1:8000/v1/chat/completions",
+            core.custom_chat_url("http://127.0.0.1:8000/v1"),
+        )
+        sampling = core.normalize_sampling({
+            "max_tokens": 2,
+            "temperature": 99,
+            "top_p": -1,
+            "top_k": 999,
+            "seed": "invalid",
+        })
+        self.assertEqual(64, sampling["max_tokens"])
+        self.assertEqual(2.0, sampling["temperature"])
+        self.assertEqual(0.0, sampling["top_p"])
+        self.assertEqual(500, sampling["top_k"])
+        self.assertIsNone(sampling["seed"])
+
+    def test_provider_secrets_are_isolated_when_stores_are_supplied(self):
+        default_secret = MemorySecretStore()
+        openai_secret = MemorySecretStore()
+        store = core.SettingsStore(
+            Path("settings.json"),
+            Path("legacy.json"),
+            default_secret,
+            provider_secret_stores={"openai": openai_secret},
+        )
+
+        store.set_api_key("volc-key")
+        store.set_api_key("openai-key", "openai")
+
+        self.assertEqual("volc-key", store.get_api_key())
+        self.assertEqual("openai-key", store.get_api_key("openai"))
+        store.set_api_key("", "openai")
+        self.assertEqual("volc-key", store.get_api_key())
+        self.assertEqual("", store.get_api_key("openai"))
+
     def test_model_routes_are_split_by_plan(self):
         expected = {
             "seed-2.0-pro": core.CODING_CHAT_URL,
@@ -393,6 +607,7 @@ class CoreTests(unittest.TestCase):
                     "prompt_presets": ["not", "a", "mapping"],
                     "user_prompt": ["not", "text"],
                     "suppress_seed_2_0_shutdown_notice": "true",
+                    "theme": "neon",
                 }),
                 encoding="utf-8",
             )
@@ -408,12 +623,15 @@ class CoreTests(unittest.TestCase):
             self.assertEqual([], settings["recent_folders"])
             self.assertEqual({}, settings["prompt_presets"])
             self.assertEqual("", settings["user_prompt"])
+            self.assertEqual("night", settings["theme"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", settings)
 
             settings["concurrency"] = "also-invalid"
+            settings["theme"] = "invalid"
             store.save(settings)
             persisted = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(3, persisted["concurrency"])
+            self.assertEqual("night", persisted["theme"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", persisted)
 
     def test_project_summary_reports_saved_progress_and_directory_state(self):
@@ -612,6 +830,152 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(100, len(state["items"]))
             self.assertEqual("completed", state["status"])
             self.assertLessEqual(write_json.call_count, 2)
+
+    def test_stale_running_project_is_reported_as_interrupted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "media"
+            media.mkdir()
+            state_path = core.project_data_path(media, root / "appdata") / "state.json"
+            core.atomic_write_json(
+                state_path,
+                {
+                    "status": "running",
+                    "owner_pid": 99999999,
+                    "summary": {"total": 3, "success": 1},
+                },
+            )
+            summary = core.load_project_summary(media, root / "appdata")
+            self.assertEqual("interrupted", summary["status"])
+
+    def test_incomplete_paths_restore_pending_and_cancelled_items(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "media"
+            media.mkdir()
+            pending = media / "pending.jpg"
+            cancelled = media / "cancelled.jpg"
+            complete = media / "complete.jpg"
+            for path in (pending, cancelled, complete):
+                Image.new("RGB", (8, 8)).save(path)
+            core.write_caption(complete, "done")
+            state_path = core.project_data_path(media, root / "appdata") / "state.json"
+            core.atomic_write_json(
+                state_path,
+                {
+                    "status": "stopped",
+                    "metadata": {"mode": "image"},
+                    "items": {
+                        "pending.jpg": {"status": "pending"},
+                        "cancelled.jpg": {"status": "cancelled"},
+                        "complete.jpg": {"status": "success"},
+                    },
+                },
+            )
+            self.assertEqual(
+                [cancelled, pending],
+                core.load_incomplete_paths(media, "image", root / "appdata"),
+            )
+
+    def test_backup_and_diagnostics_exclude_credentials_and_caption_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_root = root / "appdata"
+            project = data_root / "projects" / "project-1"
+            project.mkdir(parents=True)
+            core.atomic_write_json(
+                data_root / "settings.json",
+                {"api_key": "plain-secret", "theme": "day"},
+            )
+            (data_root / "credentials.bin").write_bytes(b"encrypted-secret")
+            core.atomic_write_json(
+                project / "state.json",
+                {
+                    "folder": str(root / "private-folder"),
+                    "status": "completed",
+                    "items": {
+                        "private/image.jpg": {
+                            "time": "2026-08-14T12:00:00",
+                            "status": "success",
+                            "detail": "private caption text",
+                        }
+                    },
+                },
+            )
+
+            backup = core.create_app_backup(root / "backup.zip", data_root)
+            with zipfile.ZipFile(backup) as archive:
+                names = set(archive.namelist())
+                self.assertIn("data/settings.json", names)
+                self.assertIn("data/projects/project-1/state.json", names)
+                self.assertNotIn("data/credentials.bin", names)
+                backup_settings = json.loads(
+                    archive.read("data/settings.json").decode("utf-8")
+                )
+                self.assertEqual("<redacted>", backup_settings["api_key"])
+
+            diagnostics = core.create_diagnostic_bundle(
+                root / "diagnostics.zip", data_root
+            )
+            with zipfile.ZipFile(diagnostics) as archive:
+                settings = json.loads(
+                    archive.read("settings-redacted.json").decode("utf-8")
+                )
+                state = json.loads(
+                    archive.read(
+                        "projects/project-1/state-redacted.json"
+                    ).decode("utf-8")
+                )
+            self.assertEqual("<redacted>", settings["api_key"])
+            self.assertEqual("private-folder", state["folder"])
+            item = next(iter(state["items"].values()))
+            self.assertEqual("<omitted>", item["detail"])
+            self.assertNotIn("private caption text", json.dumps(state))
+
+    def test_video_batch_uses_worker_preflight_and_closes_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video_path = root / "clip.mp4"
+            video_path.write_bytes(b"small-video")
+            probes = []
+            closed = []
+
+            class FakeWorker:
+                def health(self):
+                    return {"capabilities": {"probe": True}}
+
+                def probe(self, path):
+                    probes.append(path)
+                    return {"video_streams": [{"codec_name": "h264"}]}
+
+                def close(self):
+                    closed.append(True)
+
+            def factory(_roots):
+                return FakeWorker()
+
+            def sender(method, url, **kwargs):
+                return FakeResponse(
+                    payload={"choices": [{"message": {"content": "video caption"}}]}
+                )
+
+            with mock.patch.object(core, "app_data_dir", return_value=root / "appdata"):
+                runner = core.BatchRunner(
+                    lambda kind, payload: None,
+                    core.HttpTransport(sender),
+                    factory,
+                )
+                summary = runner.run(
+                    root,
+                    "video",
+                    "prompt",
+                    "seed-2.1-pro",
+                    "key",
+                    video_preflight=True,
+                )
+            self.assertEqual(1, summary.success)
+            self.assertEqual([video_path], probes)
+            self.assertTrue(closed)
 
     def test_export_jsonl_and_csv(self):
         with tempfile.TemporaryDirectory() as directory:

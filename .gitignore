@@ -22,6 +22,7 @@ media_caption_tool_launcher.py
 
 # Source artwork and one-off asset preparation helpers
 assets/*-source.*
+assets/nav-icon-sources/
 assets/launch-tech.png
 tools/generate_launch_visual.py
 tools/prepare_launch_screen.py
@@ -30,6 +31,7 @@ tools/prepare_launch_screen.py
 config.json
 settings.json
 credentials.bin
+credentials-*.bin
 .env
 .env.*
 *.log

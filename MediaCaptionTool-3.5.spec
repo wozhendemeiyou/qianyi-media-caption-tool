@@ -1,16 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+datas = [
+    ("assets/launch-qianyi.png", "assets"),
+    ("assets/qianyi-app-icon.png", "assets"),
+    ("assets/qianyi-app.ico", "assets"),
+    ("assets/nav-icons", "assets/nav-icons"),
+    ("assets/provider-icons", "assets/provider-icons"),
+]
+for hero_asset in ("assets/launch-hero.jpg", "assets/launch-hero.png"):
+    if Path(hero_asset).is_file():
+        datas.append((hero_asset, "assets"))
+if Path("assets/media").is_dir():
+    datas.append(("assets/media", "assets/media"))
 
 a = Analysis(
     ["media_caption_tool_v3.py"],
     pathex=[],
     binaries=[],
-    datas=[
-        ("assets/launch-im-aios.jpg", "assets"),
-        ("assets/launch-qianyi.png", "assets"),
-        ("assets/qianyi-app-icon.png", "assets"),
-        ("assets/qianyi-app.ico", "assets"),
-    ],
+    datas=datas,
     hiddenimports=["_pillow_heif"],
     hookspath=[],
     hooksconfig={},
@@ -27,7 +36,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="MediaCaptionTool-3.4-Studio",
+    name="MediaCaptionTool-3.5-Studio",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

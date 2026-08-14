@@ -13,7 +13,7 @@
     "platform": "Windows-11-10.0.26200-SP0",
     "python": "3.12.13"
   },
-  "generated_at": "2026-08-08T10:52:48+0800",
+  "generated_at": "2026-08-10T21:24:50+0800",
   "offline": true,
   "passed": true,
   "performance_limits": {
@@ -39,11 +39,11 @@
       "orphan_captions": 100,
       "passed": true,
       "peak_rss_limit_mb": 512,
-      "peak_rss_mb": 59.0,
+      "peak_rss_mb": 59.39,
       "performance_violations": [],
-      "rss_delta_mb": 15.6,
-      "seconds": 10.47,
-      "setup_seconds": 8.429,
+      "rss_delta_mb": 15.0,
+      "seconds": 7.452,
+      "setup_seconds": 6.266,
       "unreadable": 50
     },
     {
@@ -62,30 +62,30 @@
       "passed": true,
       "peak_active_requests": 10,
       "peak_rss_limit_mb": 512,
-      "peak_rss_mb": 53.61,
+      "peak_rss_mb": 54.35,
       "performance_violations": [],
       "requests": 2000,
-      "rss_delta_mb": -0.54,
-      "seconds": 6.004,
-      "setup_seconds": 2.23,
+      "rss_delta_mb": 0.94,
+      "seconds": 5.492,
+      "setup_seconds": 1.076,
       "success": 1883
     },
     {
-      "cancel_latency_seconds": 0.811,
-      "cancelled": 1964,
+      "cancel_latency_seconds": 0.459,
+      "cancelled": 1968,
       "duration_limit_seconds": 10,
       "error": "",
       "items": 2000,
       "name": "cancellation_under_load",
       "passed": true,
       "peak_rss_limit_mb": 512,
-      "peak_rss_mb": 54.21,
+      "peak_rss_mb": 54.38,
       "performance_violations": [],
       "requests_before_stop": 40,
-      "rss_delta_mb": 0.64,
-      "seconds": 1.06,
-      "setup_seconds": 2.095,
-      "success_before_stop": 36
+      "rss_delta_mb": -0.03,
+      "seconds": 0.608,
+      "setup_seconds": 1.091,
+      "success_before_stop": 32
     },
     {
       "csv_bytes": 688906,
@@ -96,11 +96,11 @@
       "name": "bulk_export",
       "passed": true,
       "peak_rss_limit_mb": 512,
-      "peak_rss_mb": 78.34,
+      "peak_rss_mb": 79.62,
       "performance_violations": [],
-      "rss_delta_mb": 17.64,
-      "seconds": 17.601,
-      "setup_seconds": 15.159
+      "rss_delta_mb": 17.55,
+      "seconds": 20.376,
+      "setup_seconds": 8.346
     },
     {
       "duration_limit_seconds": 60,
@@ -111,13 +111,13 @@
       "name": "worst_case_similarity_group",
       "passed": true,
       "peak_rss_limit_mb": 512,
-      "peak_rss_mb": 71.39,
+      "peak_rss_mb": 72.27,
       "performance_violations": [],
-      "rss_delta_mb": 0.56,
-      "seconds": 1.806,
-      "setup_seconds": 2.017
+      "rss_delta_mb": 0.64,
+      "seconds": 1.225,
+      "setup_seconds": 0.816
     }
   ],
   "suite_performance_violation": "",
-  "total_seconds": 76.875
+  "total_seconds": 57.299
 }

@@ -12,26 +12,48 @@ import io
 import json
 import mimetypes
 import os
+import platform
 from pathlib import Path
 import queue
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Iterable, Iterator
+import zipfile
 
 from PIL import Image, ImageOps
 import pillow_heif
 import requests
 
+from media_caption_worker import (
+    MediaWorkerController,
+    MediaWorkerError,
+    media_tool_status,
+)
+
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
+GITHUB_REPOSITORY = "wozhendemeiyou/qianyi-media-caption-tool"
+GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
+GITHUB_LATEST_RELEASE_API = (
+    f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+)
 CODING_CHAT_URL = "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
 STANDARD_CHAT_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 FILES_URL = "https://ark.cn-beijing.volces.com/api/v3/files"
 RESPONSES_URL = "https://ark.cn-beijing.volces.com/api/v3/responses"
+PROVIDER_TEST_URLS = {
+    "volcengine": "https://ark.cn-beijing.volces.com/api/v3/models",
+    "openai": "https://api.openai.com/v1/models",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai/models",
+    "moonshot": "https://api.moonshot.cn/v1/models",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+    "siliconflow": "https://api.siliconflow.cn/v1/models",
+}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
 ALL_MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
@@ -102,6 +124,20 @@ class ModelOption:
         return self.billing
 
 
+@dataclass(frozen=True)
+class ApiProviderOption:
+    key: str
+    label: str
+    chat_url: str
+    default_model: str
+    model_suggestions: tuple[str, ...]
+    billing: str
+    supported_parameters: frozenset[str]
+    supports_video: bool = False
+    allows_custom_endpoint: bool = False
+    endpoint_suggestions: tuple[str, ...] = ()
+
+
 MODELS = {
     "seed-2.1-pro": ModelOption(
         "seed-2.1-pro",
@@ -134,8 +170,159 @@ MODELS = {
         CODING_CHAT_URL,
         "Coding Plan",
     ),
+    "minimax-m3": ModelOption(
+        "minimax-m3",
+        "MiniMax M3",
+        "MiniMax-M3",
+        CODING_CHAT_URL,
+        "Coding Plan",
+    ),
 }
 DEFAULT_MODEL_KEY = "seed-2.1-pro"
+
+API_PROVIDERS = {
+    "volcengine": ApiProviderOption(
+        "volcengine",
+        "火山引擎",
+        "",
+        MODELS[DEFAULT_MODEL_KEY].model_id,
+        tuple(model.model_id for model in MODELS.values()),
+        "按所选模型计费",
+        frozenset({
+            "max_tokens", "temperature", "top_p", "frequency_penalty",
+            "presence_penalty", "seed",
+        }),
+        supports_video=True,
+        endpoint_suggestions=(CODING_CHAT_URL, STANDARD_CHAT_URL),
+    ),
+    "openai": ApiProviderOption(
+        "openai",
+        "OpenAI",
+        "https://api.openai.com/v1/chat/completions",
+        "gpt-5.6-terra",
+        (
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.6",
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+        ),
+        "按量计费",
+        frozenset({
+            "max_tokens", "temperature", "top_p", "frequency_penalty",
+            "presence_penalty", "seed",
+        }),
+        endpoint_suggestions=("https://api.openai.com/v1/chat/completions",),
+    ),
+    "google": ApiProviderOption(
+        "google",
+        "Google Gemini",
+        "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "gemini-3.6-flash",
+        (
+            "gemini-3.6-flash",
+            "gemini-3.5",
+            "gemini-3.5-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ),
+        "按量计费",
+        frozenset({"max_tokens", "temperature", "top_p", "seed"}),
+        endpoint_suggestions=(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        ),
+    ),
+    "moonshot": ApiProviderOption(
+        "moonshot",
+        "月之暗面 Kimi",
+        "https://api.moonshot.cn/v1/chat/completions",
+        "kimi-k2.6",
+        (
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "moonshot-v1-128k-vision-preview",
+            "moonshot-v1-32k-vision-preview",
+            "moonshot-v1-8k-vision-preview",
+        ),
+        "按量计费",
+        frozenset({
+            "max_tokens", "temperature", "top_p",
+            "frequency_penalty", "presence_penalty",
+        }),
+        endpoint_suggestions=("https://api.moonshot.cn/v1/chat/completions",),
+    ),
+    "qwen": ApiProviderOption(
+        "qwen",
+        "阿里云百炼 · 千问",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "qwen3-vl-plus",
+        (
+            "qwen3-vl-plus",
+            "qwen3-vl-flash",
+            "qwen3-vl-235b-a22b-instruct",
+            "qwen3-vl-235b-a22b-thinking",
+            "qwen-vl-max",
+            "qwen-vl-plus",
+        ),
+        "按量计费",
+        frozenset({"max_tokens", "temperature", "top_p", "top_k", "seed"}),
+        supports_video=True,
+        endpoint_suggestions=(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        ),
+    ),
+    "siliconflow": ApiProviderOption(
+        "siliconflow",
+        "硅基流动 SiliconFlow",
+        "https://api.siliconflow.cn/v1/chat/completions",
+        "zai-org/GLM-4.6V",
+        (
+            "zai-org/GLM-4.6V",
+            "zai-org/GLM-4.5V",
+            "Qwen/Qwen2.5-VL-72B-Instruct",
+            "Qwen/Qwen2.5-VL-32B-Instruct",
+        ),
+        "按量计费",
+        frozenset({"max_tokens", "temperature", "top_p", "top_k", "seed"}),
+        endpoint_suggestions=("https://api.siliconflow.cn/v1/chat/completions",),
+    ),
+    "custom": ApiProviderOption(
+        "custom",
+        "自定义兼容接口",
+        "",
+        "gpt-4.1-mini",
+        ("gpt-4.1-mini", "Qwen/Qwen2.5-VL-72B-Instruct", "google/gemini-2.5-flash"),
+        "由服务商决定",
+        frozenset({
+            "max_tokens", "temperature", "top_p", "top_k",
+            "frequency_penalty", "presence_penalty", "seed",
+        }),
+        supports_video=True,
+        allows_custom_endpoint=True,
+        endpoint_suggestions=(
+            "http://127.0.0.1:8000/v1/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+        ),
+    ),
+}
+DEFAULT_PROVIDER_KEY = "volcengine"
+
+DEFAULT_SAMPLING = {
+    "max_tokens": 2000,
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "top_k": 0,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "seed": None,
+}
 
 
 def executable_dir() -> Path:
@@ -178,6 +365,195 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     atomic_write_text(
         path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     )
+
+
+def _timestamp_slug() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _backup_files(data_root: Path, include_credentials: bool) -> Iterator[Path]:
+    allowed_top_level = {"settings.json", "projects"}
+    if include_credentials:
+        allowed_top_level.add("credentials.bin")
+    for path in data_root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        relative = path.relative_to(data_root)
+        if not relative.parts or relative.parts[0] not in allowed_top_level:
+            continue
+        if (
+            relative.parts[0] == "projects"
+            and path.suffix.casefold() not in {".json", ".jsonl", ".log", ".csv"}
+        ):
+            continue
+        yield path
+    if include_credentials:
+        for path in data_root.glob("credentials-*.bin"):
+            if path.is_file() and not path.is_symlink():
+                yield path
+
+
+def create_app_backup(
+    destination: Path | None = None,
+    data_root: Path | None = None,
+    include_credentials: bool = False,
+) -> Path:
+    """Create an atomic metadata backup without copying user media files."""
+    source_root = Path(data_root or app_data_dir()).resolve(strict=False)
+    default_dir = source_root / "backups"
+    target = Path(destination or default_dir / f"qianyi-backup-{_timestamp_slug()}.zip")
+    if target.suffix.casefold() != ".zip":
+        target = target / f"qianyi-backup-{_timestamp_slug()}.zip"
+    target = target.resolve(strict=False)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    manifest = {
+        "application": APP_NAME,
+        "version": APP_VERSION,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "include_credentials": bool(include_credentials),
+    }
+    try:
+        with zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as archive:
+            archive.writestr(
+                "backup-manifest.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+            )
+            if source_root.is_dir():
+                for path in _backup_files(source_root, include_credentials):
+                    if path.resolve(strict=False) == target:
+                        continue
+                    relative = path.relative_to(source_root)
+                    archive_name = Path("data") / relative
+                    if relative == Path("settings.json"):
+                        safe_settings = _redact_diagnostic(load_json(path, {}))
+                        archive.writestr(
+                            str(archive_name).replace("\\", "/"),
+                            json.dumps(safe_settings, ensure_ascii=False, indent=2),
+                        )
+                    else:
+                        archive.write(path, archive_name)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def maybe_create_automatic_backup(
+    data_root: Path | None = None,
+    interval_hours: float = 24.0,
+    keep: int = 7,
+) -> Path | None:
+    root = Path(data_root or app_data_dir()).resolve(strict=False)
+    backup_dir = root / "backups"
+    backups = sorted(
+        backup_dir.glob("qianyi-backup-*.zip"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ) if backup_dir.is_dir() else []
+    interval_seconds = max(60.0, float(interval_hours) * 3600.0)
+    if backups and time.time() - backups[0].stat().st_mtime < interval_seconds:
+        return None
+    created = create_app_backup(data_root=root)
+    backups = sorted(
+        backup_dir.glob("qianyi-backup-*.zip"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for expired in backups[max(1, int(keep)):]:
+        expired.unlink(missing_ok=True)
+    return created
+
+
+def _redact_diagnostic(value: Any, key: str = "") -> Any:
+    lowered = key.casefold()
+    if any(marker in lowered for marker in ("api_key", "token", "secret", "password")):
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_diagnostic(child_value, str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_diagnostic(item, key) for item in value]
+    return value
+
+
+def _diagnostic_project_state(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    sanitized = _redact_diagnostic(payload)
+    folder = str(sanitized.get("folder") or "")
+    sanitized["folder"] = Path(folder).name if folder else ""
+    items = sanitized.get("items")
+    if isinstance(items, dict):
+        sanitized["items"] = {
+            Path(str(path)).name: {
+                "time": str(event.get("time") or ""),
+                "status": str(event.get("status") or ""),
+                "detail": "<omitted>" if event.get("detail") else "",
+            }
+            for path, event in items.items()
+            if isinstance(event, dict)
+        }
+    return sanitized
+
+
+def create_diagnostic_bundle(
+    destination: Path | None = None,
+    data_root: Path | None = None,
+) -> Path:
+    """Export redacted runtime metadata; credentials and media never enter the bundle."""
+    root = Path(data_root or app_data_dir()).resolve(strict=False)
+    default_dir = root / "diagnostics"
+    target = Path(
+        destination or default_dir / f"qianyi-diagnostics-{_timestamp_slug()}.zip"
+    )
+    if target.suffix.casefold() != ".zip":
+        target = target / f"qianyi-diagnostics-{_timestamp_slug()}.zip"
+    target = target.resolve(strict=False)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    tools = media_tool_status()
+    system_info = {
+        "application": APP_NAME,
+        "version": APP_VERSION,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "media_tools": {
+            name: {"available": bool(path), "file": Path(path).name if path else ""}
+            for name, path in tools.items()
+        },
+    }
+    settings = _redact_diagnostic(load_json(root / "settings.json", {}))
+    try:
+        with zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as archive:
+            archive.writestr(
+                "system.json", json.dumps(system_info, ensure_ascii=False, indent=2)
+            )
+            archive.writestr(
+                "settings-redacted.json",
+                json.dumps(settings, ensure_ascii=False, indent=2),
+            )
+            projects_root = root / "projects"
+            if projects_root.is_dir():
+                for state_path in projects_root.glob("*/state.json"):
+                    project_id = state_path.parent.name
+                    state = _diagnostic_project_state(load_json(state_path, {}))
+                    archive.writestr(
+                        f"projects/{project_id}/state-redacted.json",
+                        json.dumps(state, ensure_ascii=False, indent=2),
+                    )
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
 
 
 class SecretStore:
@@ -257,8 +633,13 @@ class DpapiSecretStore(SecretStore):
 
 
 DEFAULT_SETTINGS = {
-    "version": 5,
+    "version": 10,
     "model_key": DEFAULT_MODEL_KEY,
+    "provider_key": DEFAULT_PROVIDER_KEY,
+    "api_models": {},
+    "api_endpoints": {},
+    "custom_api_endpoint": "",
+    "sampling": dict(DEFAULT_SAMPLING),
     "last_folder": "",
     "recent_folders": [],
     "concurrency": 3,
@@ -273,8 +654,11 @@ DEFAULT_SETTINGS = {
     "output_language": "zh",
     "trigger_word": "",
     "user_prompt": "",
-    "selected_preset": "详细自然语言",
+    "selected_preset": "",
     "prompt_presets": {},
+    "theme": "night",
+    "auto_check_updates": True,
+    "video_preflight": True,
 }
 
 
@@ -301,6 +685,284 @@ def bounded_bool(value: Any, default: bool) -> bool:
     return default
 
 
+def bounded_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_sampling(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    seed_value = source.get("seed")
+    try:
+        seed = int(seed_value) if seed_value not in {None, ""} else None
+    except (TypeError, ValueError):
+        seed = None
+    if seed is not None:
+        seed = max(0, min(2_147_483_647, seed))
+    return {
+        "max_tokens": bounded_int(source.get("max_tokens"), 2000, 64, 32768),
+        "temperature": bounded_float(source.get("temperature"), 0.2, 0.0, 2.0),
+        "top_p": bounded_float(source.get("top_p"), 0.9, 0.0, 1.0),
+        "top_k": bounded_int(source.get("top_k"), 0, 0, 500),
+        "frequency_penalty": bounded_float(
+            source.get("frequency_penalty"), 0.0, -2.0, 2.0
+        ),
+        "presence_penalty": bounded_float(
+            source.get("presence_penalty"), 0.0, -2.0, 2.0
+        ),
+        "seed": seed,
+    }
+
+
+def version_tuple(value: Any) -> tuple[int, ...]:
+    """Return a comparable numeric version without trusting release labels."""
+    match = re.search(r"(?<!\d)(\d+(?:\.\d+){0,3})", str(value or ""))
+    if match is None:
+        return ()
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def is_newer_version(candidate: Any, current: Any = APP_VERSION) -> bool:
+    latest = version_tuple(candidate)
+    installed = version_tuple(current)
+    if not latest or not installed:
+        return False
+    width = max(len(latest), len(installed))
+    return latest + (0,) * (width - len(latest)) > installed + (0,) * (
+        width - len(installed)
+    )
+
+
+def check_latest_release(
+    transport: "HttpTransport | None" = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Read the public GitHub release feed and select a Windows update asset."""
+    sender = transport or HttpTransport()
+    response = sender.request(
+        "GET",
+        GITHUB_LATEST_RELEASE_API,
+        token=CancellationToken(),
+        api_key="",
+        attempts=1,
+        timeout=timeout,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"Qianyi-Media-Caption-Tool/{APP_VERSION}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"GitHub Release 查询失败（HTTP {response.status_code}）")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub Release 返回格式无效")
+    tag = str(payload.get("tag_name") or payload.get("name") or "").strip()
+    if not version_tuple(tag):
+        raise RuntimeError("GitHub Release 缺少有效版本号")
+    assets = []
+    for asset in payload.get("assets") or ():
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "").strip()
+        url = str(asset.get("browser_download_url") or "").strip()
+        if not name or not url:
+            continue
+        digest = str(asset.get("digest") or "").strip().casefold()
+        assets.append({
+            "name": name,
+            "url": url,
+            "size": max(0, int(asset.get("size") or 0)),
+            "content_type": str(asset.get("content_type") or "").strip(),
+            "sha256": digest.removeprefix("sha256:") if digest.startswith("sha256:") else "",
+        })
+    windows_asset = next(
+        (
+            asset
+            for asset in assets
+            if asset["name"].casefold().endswith((".exe", ".zip"))
+            and any(
+                marker in asset["name"].casefold()
+                for marker in ("windows", "win64", "win-x64", "x64")
+            )
+        ),
+        None,
+    )
+    return {
+        "tag": tag,
+        "name": str(payload.get("name") or tag).strip(),
+        "url": str(payload.get("html_url") or GITHUB_RELEASES_URL).strip(),
+        "published_at": str(payload.get("published_at") or "").strip(),
+        "notes": str(payload.get("body") or "").strip(),
+        "is_newer": is_newer_version(tag),
+        "assets": assets,
+        "windows_asset": windows_asset,
+    }
+
+
+def download_release_asset(
+    asset: dict[str, Any],
+    destination_dir: Path | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    timeout: tuple[float, float] = (10, 180),
+) -> Path:
+    """Download and validate a release asset without executing it."""
+    url = str(asset.get("url") or "").strip()
+    name = Path(str(asset.get("name") or "")).name
+    if not url.startswith("https://github.com/") or not name:
+        raise ValueError("更新包地址无效")
+    target_dir = Path(destination_dir or tempfile.mkdtemp(prefix="qianyi-update-"))
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / name
+    response = requests.get(
+        url,
+        stream=True,
+        timeout=timeout,
+        headers={"User-Agent": f"Qianyi-Media-Caption-Tool/{APP_VERSION}"},
+    )
+    response.raise_for_status()
+    total = max(0, int(response.headers.get("Content-Length") or asset.get("size") or 0))
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        with target.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=1024 * 256):
+                if not chunk:
+                    continue
+                output.write(chunk)
+                digest.update(chunk)
+                received += len(chunk)
+                if progress is not None:
+                    progress(received, total)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    expected_size = max(0, int(asset.get("size") or 0))
+    if expected_size and received != expected_size:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("更新包大小校验失败")
+    expected_hash = str(asset.get("sha256") or "").strip().casefold()
+    if expected_hash and digest.hexdigest().casefold() != expected_hash:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("更新包 SHA-256 校验失败")
+    if target.suffix.casefold() == ".zip":
+        try:
+            with zipfile.ZipFile(target) as archive:
+                bad_file = archive.testzip()
+        except zipfile.BadZipFile as error:
+            target.unlink(missing_ok=True)
+            raise RuntimeError("下载的更新包不是有效 ZIP") from error
+        if bad_file:
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f"更新包文件损坏：{bad_file}")
+    elif target.suffix.casefold() == ".exe" and target.read_bytes()[:2] != b"MZ":
+        target.unlink(missing_ok=True)
+        raise RuntimeError("下载的更新程序格式无效")
+    return target
+
+
+def extract_update_executable(asset_path: Path, destination_dir: Path) -> Path:
+    """Extract the most likely application executable from an update package."""
+    source = Path(asset_path)
+    destination = Path(destination_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    if source.suffix.casefold() == ".exe":
+        target = destination / source.name
+        shutil.copy2(source, target)
+        return target
+    if source.suffix.casefold() != ".zip":
+        raise RuntimeError("更新资产必须是 EXE 或 ZIP")
+    with zipfile.ZipFile(source) as archive:
+        candidates = [
+            info
+            for info in archive.infolist()
+            if not info.is_dir() and Path(info.filename).suffix.casefold() == ".exe"
+        ]
+        if not candidates:
+            raise RuntimeError("更新包中没有找到可执行程序")
+        candidate = max(candidates, key=lambda item: item.file_size)
+        safe_name = Path(candidate.filename).name
+        target = destination / safe_name
+        with archive.open(candidate) as source_file, target.open("wb") as output:
+            shutil.copyfileobj(source_file, output)
+    if target.read_bytes()[:2] != b"MZ":
+        target.unlink(missing_ok=True)
+        raise RuntimeError("更新包内的可执行程序格式无效")
+    return target
+
+
+def test_provider_connection(
+    provider_key: str,
+    api_key: str,
+    transport: "HttpTransport | None" = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """Validate credentials using a non-generating model-list request."""
+    if provider_key not in PROVIDER_TEST_URLS:
+        raise ValueError("当前平台不支持连接测试")
+    secret = str(api_key or "").strip()
+    if not secret:
+        raise ValueError("请先填写 API Key")
+    started = time.monotonic()
+    response = (transport or HttpTransport()).request(
+        "GET",
+        PROVIDER_TEST_URLS[provider_key],
+        token=CancellationToken(),
+        api_key=secret,
+        attempts=1,
+        timeout=(5, timeout),
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "Accept": "application/json",
+            "User-Agent": f"Qianyi-Media-Caption-Tool/{APP_VERSION}",
+        },
+    )
+    return {
+        "ok": True,
+        "status": int(getattr(response, "status_code", 200)),
+        "latency_ms": max(1, round((time.monotonic() - started) * 1000)),
+    }
+
+
+def create_windows_update_script(
+    update_executable: Path,
+    installed_executable: Path,
+    parent_pid: int,
+    directory: Path | None = None,
+) -> Path:
+    """Create a one-shot PowerShell updater that runs after this process exits."""
+    source = Path(update_executable).resolve()
+    target = Path(installed_executable).resolve()
+    if source == target or source.suffix.casefold() != ".exe":
+        raise ValueError("更新程序路径无效")
+    if source.read_bytes()[:2] != b"MZ":
+        raise RuntimeError("更新程序格式无效")
+
+    def quoted(path: Path) -> str:
+        return str(path).replace("'", "''")
+
+    script_dir = Path(directory or source.parent)
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / "install-qianyi-update.ps1"
+    log_path = script_dir / "update-error.log"
+    body = f"""$ErrorActionPreference = 'Stop'
+try {{
+    Wait-Process -Id {int(parent_pid)} -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath '{quoted(source)}' -Destination '{quoted(target)}' -Force
+    Start-Process -FilePath '{quoted(target)}'
+}} catch {{
+    $_ | Out-String | Set-Content -LiteralPath '{quoted(log_path)}' -Encoding UTF8
+}} finally {{
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}}
+"""
+    script.write_text(body, encoding="utf-8-sig")
+    return script
+
+
 def model_key_from_legacy(value: str) -> str:
     normalized = (value or "").casefold()
     for key, model in MODELS.items():
@@ -321,10 +983,27 @@ class SettingsStore:
         settings_path: Path | None = None,
         legacy_path: Path | None = None,
         secret_store: SecretStore | None = None,
+        provider_secret_stores: dict[str, SecretStore] | None = None,
     ):
         self.settings_path = settings_path or app_data_dir() / "settings.json"
         self.legacy_path = legacy_path or executable_dir() / "config.json"
         self.secret_store = secret_store or DpapiSecretStore()
+        self.provider_secret_stores = dict(provider_secret_stores or {})
+        self._volatile_provider_secrets: dict[str, str] = {}
+
+    def _provider_secret_store(self, provider_key: str) -> SecretStore | None:
+        normalized = provider_key if provider_key in API_PROVIDERS else DEFAULT_PROVIDER_KEY
+        if normalized == DEFAULT_PROVIDER_KEY:
+            return self.secret_store
+        if normalized in self.provider_secret_stores:
+            return self.provider_secret_stores[normalized]
+        if isinstance(self.secret_store, DpapiSecretStore):
+            store = DpapiSecretStore(
+                self.secret_store.path.with_name(f"credentials-{normalized}.bin")
+            )
+            self.provider_secret_stores[normalized] = store
+            return store
+        return None
 
     def load(self) -> dict[str, Any]:
         stored = load_json(self.settings_path, {})
@@ -351,6 +1030,29 @@ class SettingsStore:
         settings["prompt_presets"] = dict(presets) if isinstance(presets, dict) else {}
         user_prompt = settings.get("user_prompt")
         settings["user_prompt"] = user_prompt if isinstance(user_prompt, str) else ""
+        provider_key = str(settings.get("provider_key", DEFAULT_PROVIDER_KEY))
+        settings["provider_key"] = (
+            provider_key if provider_key in API_PROVIDERS else DEFAULT_PROVIDER_KEY
+        )
+        api_models = settings.get("api_models")
+        settings["api_models"] = {
+            key: str(model).strip()
+            for key, model in (api_models.items() if isinstance(api_models, dict) else ())
+            if key in API_PROVIDERS and str(model).strip()
+        }
+        api_endpoints = settings.get("api_endpoints")
+        settings["api_endpoints"] = {
+            key: str(endpoint).strip()
+            for key, endpoint in (
+                api_endpoints.items() if isinstance(api_endpoints, dict) else ()
+            )
+            if key in API_PROVIDERS and str(endpoint).strip()
+        }
+        endpoint = settings.get("custom_api_endpoint")
+        settings["custom_api_endpoint"] = endpoint.strip() if isinstance(endpoint, str) else ""
+        if settings["custom_api_endpoint"] and "custom" not in settings["api_endpoints"]:
+            settings["api_endpoints"]["custom"] = settings["custom_api_endpoint"]
+        settings["sampling"] = normalize_sampling(settings.get("sampling"))
         settings["backend"] = settings.get("backend") if settings.get("backend") in {"api", "local"} else "api"
         settings["labeling_focus"] = (
             settings.get("labeling_focus")
@@ -361,6 +1063,17 @@ class SettingsStore:
             settings.get("output_language")
             if settings.get("output_language") in {"zh", "en"}
             else "zh"
+        )
+        settings["theme"] = (
+            settings.get("theme")
+            if settings.get("theme") in {"night", "day"}
+            else "night"
+        )
+        settings["auto_check_updates"] = bounded_bool(
+            settings.get("auto_check_updates"), True
+        )
+        settings["video_preflight"] = bounded_bool(
+            settings.get("video_preflight"), True
         )
         plaintext_key = source.get("api_key")
         if plaintext_key and not self.secret_store.get():
@@ -373,7 +1086,6 @@ class SettingsStore:
         settings.pop("chat_url", None)
         settings.pop("model", None)
         settings.pop("model_id", None)
-        settings.pop("auto_check_updates", None)
         settings.pop("suppress_seed_2_0_shutdown_notice", None)
         if source and (
             not stored
@@ -397,14 +1109,47 @@ class SettingsStore:
             "chat_url",
             "model",
             "model_id",
-            "auto_check_updates",
             "suppress_seed_2_0_shutdown_notice",
         ):
             cleaned.pop(key, None)
-        cleaned["version"] = 5
+        cleaned["version"] = 10
+        cleaned["theme"] = (
+            cleaned.get("theme")
+            if cleaned.get("theme") in {"night", "day"}
+            else "night"
+        )
+        cleaned["auto_check_updates"] = bounded_bool(
+            cleaned.get("auto_check_updates"), True
+        )
+        cleaned["video_preflight"] = bounded_bool(
+            cleaned.get("video_preflight"), True
+        )
         cleaned["concurrency"] = bounded_int(
             cleaned.get("concurrency", 3), 3, 1, MAX_CONCURRENCY
         )
+        provider_key = str(cleaned.get("provider_key", DEFAULT_PROVIDER_KEY))
+        cleaned["provider_key"] = (
+            provider_key if provider_key in API_PROVIDERS else DEFAULT_PROVIDER_KEY
+        )
+        api_models = cleaned.get("api_models")
+        cleaned["api_models"] = {
+            key: str(model).strip()
+            for key, model in (api_models.items() if isinstance(api_models, dict) else ())
+            if key in API_PROVIDERS and str(model).strip()
+        }
+        api_endpoints = cleaned.get("api_endpoints")
+        cleaned["api_endpoints"] = {
+            key: str(endpoint).strip()
+            for key, endpoint in (
+                api_endpoints.items() if isinstance(api_endpoints, dict) else ()
+            )
+            if key in API_PROVIDERS and str(endpoint).strip()
+        }
+        endpoint = cleaned.get("custom_api_endpoint")
+        cleaned["custom_api_endpoint"] = endpoint.strip() if isinstance(endpoint, str) else ""
+        if cleaned["custom_api_endpoint"]:
+            cleaned["api_endpoints"]["custom"] = cleaned["custom_api_endpoint"]
+        cleaned["sampling"] = normalize_sampling(cleaned.get("sampling"))
         user_prompt = cleaned.get("user_prompt")
         cleaned["user_prompt"] = user_prompt if isinstance(user_prompt, str) else ""
         atomic_write_json(self.settings_path, cleaned)
@@ -421,13 +1166,26 @@ class SettingsStore:
         else:
             self.legacy_path.unlink(missing_ok=True)
 
-    def get_api_key(self) -> str:
-        return self.secret_store.get()
+    def get_api_key(self, provider_key: str = DEFAULT_PROVIDER_KEY) -> str:
+        normalized = provider_key if provider_key in API_PROVIDERS else DEFAULT_PROVIDER_KEY
+        store = self._provider_secret_store(normalized)
+        if store is not None:
+            return store.get()
+        return self._volatile_provider_secrets.get(normalized, "")
 
-    def set_api_key(self, value: str) -> None:
+    def set_api_key(self, value: str, provider_key: str = DEFAULT_PROVIDER_KEY) -> None:
         normalized = value.strip()
-        self.secret_store.set(normalized)
-        if not normalized:
+        normalized_provider = (
+            provider_key if provider_key in API_PROVIDERS else DEFAULT_PROVIDER_KEY
+        )
+        store = self._provider_secret_store(normalized_provider)
+        if store is not None:
+            store.set(normalized)
+        elif normalized:
+            self._volatile_provider_secrets[normalized_provider] = normalized
+        else:
+            self._volatile_provider_secrets.pop(normalized_provider, None)
+        if not normalized and normalized_provider == DEFAULT_PROVIDER_KEY:
             self._remove_legacy_api_key()
 
 
@@ -951,6 +1709,15 @@ def _responses_text(payload: dict[str, Any]) -> str:
     raise ApiError("接口响应缺少文本结果", body=json.dumps(payload, ensure_ascii=False)[:600])
 
 
+def custom_chat_url(value: str) -> str:
+    endpoint = value.strip().rstrip("/")
+    if not endpoint:
+        return ""
+    if endpoint.endswith("/chat/completions"):
+        return endpoint
+    return f"{endpoint}/chat/completions"
+
+
 class CaptionClient:
     def __init__(
         self,
@@ -958,15 +1725,32 @@ class CaptionClient:
         api_key: str,
         token: CancellationToken,
         transport: HttpTransport | None = None,
+        provider_key: str = DEFAULT_PROVIDER_KEY,
+        api_model: str = "",
+        api_endpoint: str = "",
+        sampling: dict[str, Any] | None = None,
     ):
         self.model = model
         self.api_key = api_key
         self.token = token
         self.transport = transport or HttpTransport()
+        self.provider = API_PROVIDERS.get(
+            provider_key, API_PROVIDERS[DEFAULT_PROVIDER_KEY]
+        )
+        self.api_model = api_model.strip() or (
+            model.model_id
+            if self.provider.key == DEFAULT_PROVIDER_KEY
+            else self.provider.default_model
+        )
+        self.api_endpoint = api_endpoint.strip()
+        self.sampling = normalize_sampling(sampling)
 
     @property
     def headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _billable_post(self, url: str, payload: dict[str, Any], timeout=(10, 180)) -> dict[str, Any]:
         # A timed-out generation may already have been billed. Do not retry it automatically.
@@ -982,11 +1766,50 @@ class CaptionClient:
         )
         return _response_json(response, self.api_key)
 
+    def _chat_url(self) -> str:
+        if self.api_endpoint:
+            return custom_chat_url(self.api_endpoint)
+        if self.provider.key == DEFAULT_PROVIDER_KEY:
+            return self.model.chat_url_for()
+        if self.provider.allows_custom_endpoint:
+            endpoint = custom_chat_url(self.api_endpoint)
+            if not endpoint:
+                raise ValueError("请填写自定义 Chat Completions 地址")
+            return endpoint
+        return self.provider.chat_url
+
+    def _sampling_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key in self.provider.supported_parameters:
+            value = self.sampling.get(key)
+            if key == "seed" and value is None:
+                continue
+            if key == "top_k" and not value:
+                continue
+            target_key = (
+                "max_completion_tokens"
+                if self.provider.key == "openai"
+                and self.api_model.startswith("gpt-5")
+                and key == "max_tokens"
+                else key
+            )
+            payload[target_key] = value
+        if self.provider.key == "openai" and self.api_model.startswith("gpt-5"):
+            payload["reasoning_effort"] = "none"
+        return payload
+
+    def _responses_sampling_payload(self) -> dict[str, Any]:
+        payload = {"max_output_tokens": self.sampling["max_tokens"]}
+        for key in ("temperature", "top_p"):
+            if key in self.provider.supported_parameters:
+                payload[key] = self.sampling[key]
+        return payload
+
     def caption_image(self, path: Path, prompt: str) -> str:
         prepared = prepare_image(path)
         encoded = base64.b64encode(prepared.data).decode("ascii")
         payload = {
-            "model": self.model.model_id,
+            "model": self.api_model,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -994,19 +1817,23 @@ class CaptionClient:
                     {"type": "text", "text": prompt},
                 ],
             }],
-            "max_tokens": 2000,
         }
-        text = _chat_text(self._billable_post(self.model.chat_url_for(), payload))
+        payload.update(self._sampling_payload())
+        text = _chat_text(self._billable_post(self._chat_url(), payload))
         if not text:
             raise ApiError("模型返回了空结果")
         return text
 
     def caption_video(self, path: Path, prompt: str) -> str:
+        if not self.provider.supports_video:
+            raise ValueError(f"{self.provider.label} 当前未启用视频输入，请切换火山引擎或兼容视频的平台")
         size = path.stat().st_size
         if size > VIDEO_UPLOAD_LIMIT:
             raise ValueError("视频大于 512 MB，无法上传")
         if size <= VIDEO_CHAT_LIMIT:
             return self._caption_small_video(path, prompt)
+        if self.provider.key != DEFAULT_PROVIDER_KEY:
+            raise ValueError("当前平台仅支持 20 MB 以内的视频直传；大视频请切换火山引擎")
         return self._caption_uploaded_video(path, prompt)
 
     def _caption_small_video(self, path: Path, prompt: str) -> str:
@@ -1014,7 +1841,7 @@ class CaptionClient:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         self.token.check()
         payload = {
-            "model": self.model.model_id,
+            "model": self.api_model,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -1022,9 +1849,9 @@ class CaptionClient:
                     {"type": "text", "text": prompt},
                 ],
             }],
-            "max_tokens": 2000,
         }
-        text = _chat_text(self._billable_post(self.model.chat_url_for(), payload, timeout=(10, 240)))
+        payload.update(self._sampling_payload())
+        text = _chat_text(self._billable_post(self._chat_url(), payload, timeout=(10, 240)))
         if not text:
             raise ApiError("模型返回了空结果")
         return text
@@ -1034,7 +1861,7 @@ class CaptionClient:
         try:
             self._wait_for_file(file_id)
             payload = {
-                "model": self.model.model_id,
+                "model": self.api_model,
                 "input": [{
                     "role": "user",
                     "content": [
@@ -1043,6 +1870,7 @@ class CaptionClient:
                     ],
                 }],
             }
+            payload.update(self._responses_sampling_payload())
             return _responses_text(self._billable_post(RESPONSES_URL, payload, timeout=(10, 240)))
         finally:
             self._delete_file(file_id)
@@ -1102,6 +1930,7 @@ class LocalCaptionClient:
         self.model = None
         self.torch = None
         self.device = "cpu"
+        self.sampling = normalize_sampling(None)
         self._load_error: RuntimeError | None = None
         if not self.model_folder.is_dir():
             raise ValueError("本地模型目录不存在")
@@ -1192,11 +2021,23 @@ class LocalCaptionClient:
                 for key, value in inputs.items()
             }
         self.token.check()
+        generation = {
+            "max_new_tokens": self.sampling["max_tokens"],
+            "do_sample": self.sampling["temperature"] > 0,
+        }
+        if generation["do_sample"]:
+            generation.update({
+                "temperature": max(0.01, self.sampling["temperature"]),
+                "top_p": self.sampling["top_p"],
+            })
+            if self.sampling["top_k"]:
+                generation["top_k"] = self.sampling["top_k"]
+        if self.sampling["seed"] is not None:
+            self.torch.manual_seed(self.sampling["seed"])
         with self.torch.inference_mode():
             generated = self.model.generate(
                 **inputs,
-                max_new_tokens=512,
-                do_sample=False,
+                **generation,
             )
         self.token.check()
         input_ids = inputs.get("input_ids")
@@ -1222,9 +2063,76 @@ def project_data_path(folder: Path, data_root: Path | None = None) -> Path:
     return (data_root or app_data_dir()) / "projects" / digest
 
 
+def process_is_running(pid: Any) -> bool:
+    try:
+        process_id = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    if process_id == os.getpid():
+        return True
+    if os.name == "nt":
+        process_query_limited_information = 0x1000
+        open_process = ctypes.windll.kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        close_handle = ctypes.windll.kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(
+            process_query_limited_information, False, process_id
+        )
+        if not handle:
+            return False
+        close_handle(handle)
+        return True
+    try:
+        os.kill(process_id, 0)
+    except (OSError, PermissionError):
+        return False
+    return True
+
+
+def project_status_from_state(state: Any) -> str:
+    if not isinstance(state, dict):
+        return "new"
+    status = str(state.get("status") or "new")
+    if status == "running" and not process_is_running(state.get("owner_pid")):
+        return "interrupted"
+    return status
+
+
+def load_incomplete_paths(
+    folder: Path,
+    mode: str,
+    data_root: Path | None = None,
+) -> list[Path]:
+    state = load_json(project_data_path(folder, data_root) / "state.json", {})
+    if not isinstance(state, dict) or not isinstance(state.get("items"), dict):
+        return []
+    extensions = IMAGE_EXTENSIONS if mode == "image" else VIDEO_EXTENSIONS
+    result: list[Path] = []
+    for relative, event in state["items"].items():
+        if not isinstance(event, dict) or event.get("status") not in {
+            "failed", "cancelled", "running", "pending",
+        }:
+            continue
+        path = Path(relative)
+        path = path if path.is_absolute() else folder / path
+        if (
+            path.is_file()
+            and path.suffix.casefold() in extensions
+            and not has_usable_caption(path)
+        ):
+            result.append(path)
+    return sorted(set(result))
+
+
 def load_project_summary(folder: Path, data_root: Path | None = None) -> dict[str, Any]:
     state = load_json(project_data_path(folder, data_root) / "state.json", {})
     summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
 
     def count(name: str) -> int:
         try:
@@ -1236,12 +2144,13 @@ def load_project_summary(folder: Path, data_root: Path | None = None) -> dict[st
         "folder": str(folder),
         "name": folder.name or str(folder),
         "exists": folder.is_dir(),
-        "status": str(state.get("status", "new")),
+        "status": project_status_from_state(state),
         "updated_at": str(state.get("finished_at") or state.get("updated_at") or ""),
         "total": count("total"),
         "success": count("success"),
         "skipped": count("skipped"),
         "failed": count("failed"),
+        "mode": str(metadata.get("mode") or "image"),
     }
 
 
@@ -1281,11 +2190,34 @@ class ProjectJournal:
         self._last_checkpoint = 0.0
 
     def start(self, metadata: dict[str, Any]) -> None:
+        previous = load_json(self.state_path, {})
+        previous_run_id = ""
+        previous_status = ""
+        if isinstance(previous, dict) and previous:
+            previous_run_id = str(previous.get("run_id") or "")
+            previous_status = project_status_from_state(previous)
+            history_dir = self.project_dir / "history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            archive_name = previous_run_id or _timestamp_slug()
+            atomic_write_json(history_dir / f"state-{archive_name}.json", previous)
+            history = sorted(
+                history_dir.glob("state-*.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for expired in history[30:]:
+                expired.unlink(missing_ok=True)
         self.state = {
             "folder": str(self.folder), "run_id": self.run_id,
             "status": "running", "started_at": datetime.now().isoformat(timespec="seconds"),
+            "owner_pid": os.getpid(),
             "metadata": metadata, "items": {},
         }
+        if previous_run_id:
+            self.state["previous_run"] = {
+                "run_id": previous_run_id,
+                "status": previous_status,
+            }
         atomic_write_json(self.state_path, self.state)
         self._last_checkpoint = time.monotonic()
 
@@ -1341,10 +2273,18 @@ class BatchSummary:
 
 
 class BatchRunner:
-    def __init__(self, event_callback: Callable[[str, dict[str, Any]], None], transport: HttpTransport | None = None):
+    def __init__(
+        self,
+        event_callback: Callable[[str, dict[str, Any]], None],
+        transport: HttpTransport | None = None,
+        media_worker_factory: Callable[[Iterable[Path]], MediaWorkerController] | None = None,
+    ):
         self.event_callback = event_callback
         self.token = CancellationToken()
         self.transport = transport or HttpTransport()
+        self.media_worker_factory = media_worker_factory or MediaWorkerController
+        self._media_worker: MediaWorkerController | None = None
+        self._media_worker_lock = threading.Lock()
         self._running = threading.Event()
 
     @property
@@ -1354,6 +2294,10 @@ class BatchRunner:
     def cancel(self) -> None:
         self.token.cancel()
         self.transport.cancel_all()
+        with self._media_worker_lock:
+            worker = self._media_worker
+        if worker is not None:
+            worker.close()
 
     def _emit(self, kind: str, **payload) -> None:
         self.event_callback(kind, payload)
@@ -1374,10 +2318,19 @@ class BatchRunner:
         labeling_focus: str = "subject",
         output_language: str = "zh",
         trigger_word: str = "",
+        provider_key: str = DEFAULT_PROVIDER_KEY,
+        api_model: str = "",
+        api_endpoint: str = "",
+        sampling: dict[str, Any] | None = None,
         only_paths: Iterable[Path] | None = None,
+        video_preflight: bool = True,
     ) -> BatchSummary:
         self._running.set()
         model = MODELS.get(model_key, MODELS[DEFAULT_MODEL_KEY])
+        provider = API_PROVIDERS.get(
+            provider_key, API_PROVIDERS[DEFAULT_PROVIDER_KEY]
+        )
+        sampling = normalize_sampling(sampling)
         concurrency = max(1, min(MAX_CONCURRENCY, int(concurrency)))
         if backend == "local":
             concurrency = 1
@@ -1386,19 +2339,52 @@ class BatchRunner:
             "mode": mode, "caption_style": caption_style,
             "subject_filter": subject_filter,
             "backend": backend,
+            "provider": provider.key if backend == "api" else "local",
             "model": (
                 str(Path(local_model_folder).name or local_model_folder)
                 if backend == "local"
-                else model.key
+                else (model.key if provider.key == DEFAULT_PROVIDER_KEY else api_model)
             ),
             "labeling_focus": labeling_focus,
             "output_language": output_language,
             "trigger_word": trigger_word,
             "concurrency": concurrency,
+            "sampling": sampling,
+            "video_preflight": bool(video_preflight),
         })
         summary = BatchSummary()
         started = time.monotonic()
+        worker_capabilities: dict[str, Any] = {}
         try:
+            if mode == "video" and video_preflight:
+                worker_cache = app_data_dir() / "worker-cache" / journal.run_id
+                worker_cache.mkdir(parents=True, exist_ok=True)
+                try:
+                    media_worker = self.media_worker_factory([folder, worker_cache])
+                    with self._media_worker_lock:
+                        self._media_worker = media_worker
+                    health = media_worker.health()
+                    worker_capabilities = (
+                        health.get("capabilities")
+                        if isinstance(health.get("capabilities"), dict)
+                        else {}
+                    )
+                    if worker_capabilities.get("probe"):
+                        detail = "媒体引擎已按需启动，视频将先进行完整性检查"
+                    else:
+                        detail = "未检测到 FFprobe，将继续使用平台原生视频输入"
+                    journal.log(detail)
+                    self._emit("engine", status="ready", detail=detail, health=health)
+                    if not worker_capabilities.get("probe"):
+                        media_worker.close()
+                        with self._media_worker_lock:
+                            self._media_worker = None
+                except (MediaWorkerError, OSError, ValueError) as error:
+                    detail = f"媒体引擎不可用，继续使用平台原生视频输入：{error}"
+                    journal.log(detail)
+                    self._emit("engine", status="unavailable", detail=detail)
+                    with self._media_worker_lock:
+                        self._media_worker = None
             if only_paths is None:
                 scan = scan_media(folder, mode)
             else:
@@ -1429,14 +2415,24 @@ class BatchRunner:
                     journal.record(path, "skipped", "已有有效 TXT")
                     self._emit("status", path=path, status="skipped", detail="已有有效 TXT")
                 else:
+                    journal.record(path, "pending", "等待处理")
                     pending.put(path)
 
             lock = threading.Lock()
-            client = (
-                LocalCaptionClient(Path(local_model_folder), self.token)
-                if backend == "local"
-                else CaptionClient(model, api_key, self.token, self.transport)
-            )
+            if backend == "local":
+                client = LocalCaptionClient(Path(local_model_folder), self.token)
+                client.sampling = sampling
+            else:
+                client = CaptionClient(
+                    model,
+                    api_key,
+                    self.token,
+                    self.transport,
+                    provider_key=provider.key,
+                    api_model=api_model,
+                    api_endpoint=api_endpoint,
+                    sampling=sampling,
+                )
             effective_prompt = compose_prompt(
                 prompt,
                 caption_style,
@@ -1454,6 +2450,20 @@ class BatchRunner:
                     self._emit("status", path=path, status="running", detail="正在请求模型")
                     journal.record(path, "running", "正在请求模型")
                     try:
+                        if mode == "video" and worker_capabilities.get("probe"):
+                            with self._media_worker_lock:
+                                media_worker = self._media_worker
+                            if media_worker is not None:
+                                self.token.check()
+                                self._emit(
+                                    "status",
+                                    path=path,
+                                    status="running",
+                                    detail="正在检查视频完整性",
+                                )
+                                media_info = media_worker.probe(path)
+                                if not media_info.get("video_streams"):
+                                    raise MediaWorkerError("文件中没有可用的视频流")
                         caption = client.caption_image(path, effective_prompt) if mode == "image" else client.caption_video(path, effective_prompt)
                         self.token.check()
                         caption = prepend_trigger_word(
@@ -1513,6 +2523,11 @@ class BatchRunner:
             self._emit("done", status=status, summary=summary, journal_dir=journal.project_dir)
             return summary
         finally:
+            with self._media_worker_lock:
+                media_worker = self._media_worker
+                self._media_worker = None
+            if media_worker is not None:
+                media_worker.close()
             self._running.clear()
 
 
