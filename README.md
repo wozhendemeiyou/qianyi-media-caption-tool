@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 [![Tests](https://img.shields.io/badge/Tests-71%20passed-35B46F)](./tests)
-[![Version](https://img.shields.io/badge/Release-v3.5-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
+[![Version](https://img.shields.io/badge/Release-v3.6-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
 
@@ -53,7 +53,7 @@
 | 双模式检查器 | 右侧在当前素材和任务设置间切换；当前素材内集中复核标注结果、提示词和运行日志。 |
 | 固定任务栏 | 开始、停止、重试、处理选中、批处理、导出、进度和统计始终固定在窗口底部。 |
 | 系统说明与更新 | 内置功能说明、当前版本和更新日志；发现新版本后可在软件内下载、校验、覆盖并自动重启。 |
-| 多 API 平台 | 内置火山引擎、OpenAI、Google、月之暗面、千问和 SiliconFlow，提供品牌图标与免生成连接测试。 |
+| 多 API 平台 | 内置火山引擎、OpenAI、Google、月之暗面、千问和 SiliconFlow，并支持用户填写 OpenAI 兼容 Base URL、模型 ID 与 API Key。 |
 | 常驻硬件状态 | 底部持续显示 CPU、内存和 NVIDIA GPU 利用率/显存；采集在后台线程中完成，不阻塞界面。 |
 | 可恢复的批处理 | 跳过已有有效 TXT，失败项独立记录并可重试；停止任务后再次运行不会浪费已经完成的结果。 |
 | 按需媒体引擎 | 视频任务才启动独立 Worker；随机本地端口、一次性令牌和项目目录白名单共同限制访问范围。 |
@@ -128,14 +128,15 @@ dataset/
 | --- | --- | --- |
 | 火山引擎 | 豆包 Seed 系列 | 按模型自动选择 Coding Plan 或标准接口 |
 | OpenAI | `gpt-5.6-terra` | `https://api.openai.com/v1/chat/completions` |
-| Google | `gemini-3.6-flash` | Google OpenAI 兼容接口 |
-| 月之暗面 | `kimi-k2.6` | Moonshot OpenAI 兼容接口 |
-| 千问 | `qwen3-vl-plus` | 阿里云百炼兼容接口 |
-| SiliconFlow | `zai-org/GLM-4.6V` | `https://api.siliconflow.cn/v1/chat/completions` |
+| Google | `gemini-3.7-flash` | Google OpenAI 兼容接口 |
+| 月之暗面 | `kimi-k3` | Moonshot OpenAI 兼容接口 |
+| 千问 | `qwen3.8-max` | 阿里云百炼兼容接口 |
+| SiliconFlow | `Qwen/Qwen3.6-35B-A3B` | `https://api.siliconflow.cn/v1/chat/completions` |
+| 自定义 | 用户填写模型 ID | 用户填写 OpenAI 兼容 Base URL |
 
 | 界面模型 | 模型 ID | 请求地址 | 用量标签 |
 | --- | --- | --- | --- |
-| 豆包 Seed 2.1 Pro Turbo | `doubao-seed-2-1-turbo-260628` | `/api/coding/v3/chat/completions` | Coding Plan |
+| 豆包 Seed 2.1 Turbo | `doubao-seed-2-1-turbo-260628` | `/api/coding/v3/chat/completions` | Coding Plan |
 | MiniMax M3 | `MiniMax-M3` | `/api/coding/v3/chat/completions` | Coding Plan |
 | 豆包 Seed 1.6 Vision | `doubao-seed-1-6-251015` | `/api/coding/v3/chat/completions` | Coding Plan |
 | 豆包 Seed 2.1 Pro | `doubao-seed-2-1-pro-260628` | `/api/v3/chat/completions` | 按量计费 |
@@ -213,7 +214,7 @@ python -m venv .venv312
 ## 构建 Windows EXE
 
 ```powershell
-.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.5.spec
+.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.spec
 ```
 
 构建配置只收集运行所需代码与视觉资源，不打入 API Key、用户设置、项目记录或本地模型权重。如果存在 `assets/media/`，构建时会一并收集 FFmpeg 媒体组件。
@@ -229,7 +230,7 @@ python -m venv .venv312
 ├── media_caption_core.py         # 扫描、模型路由、HTTP、日志与批任务
 ├── media_caption_worker.py       # 按需媒体 Worker、安全通信与 FFmpeg 接口
 ├── media_caption_tool_v3.py      # Tkinter 桌面工作台
-├── MediaCaptionTool-3.5.spec     # PyInstaller 单文件构建
+├── MediaCaptionTool-3.6.spec     # PyInstaller 单文件构建
 ├── CHANGELOG.md                  # 每次公开版本的完整更新记录
 ├── SECURITY.md                   # 凭据、模板、本地数据与发布边界
 ├── requirements.txt              # 基础依赖

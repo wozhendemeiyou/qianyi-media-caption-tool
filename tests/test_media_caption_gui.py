@@ -713,7 +713,7 @@ class GuiTests(unittest.TestCase):
                 app.folder_var.set(str(root_path))
                 app.provider_label_var.set(core.API_PROVIDERS["qwen"].label)
                 app._provider_changed()
-                app.model_label_var.set("qwen3-vl-plus")
+                app.model_label_var.set("qwen3.8-max")
                 app.max_tokens_var.set(1400)
                 app.temperature_var.set(0.55)
                 app.top_p_var.set(0.75)
@@ -727,7 +727,7 @@ class GuiTests(unittest.TestCase):
                         time.sleep(0.01)
                 self.assertTrue(finished.is_set())
                 self.assertEqual("qwen", captured["provider_key"])
-                self.assertEqual("qwen3-vl-plus", captured["api_model"])
+                self.assertEqual("qwen3.8-max", captured["api_model"])
                 self.assertEqual(
                     core.API_PROVIDERS["qwen"].chat_url,
                     captured["api_endpoint"],
@@ -770,23 +770,25 @@ class GuiTests(unittest.TestCase):
                 dialog = app.open_platform_config()
                 controls = list(descendants(dialog))
                 self.assertEqual("平台设置", dialog.title())
-                provider_box = next(
-                    widget
-                    for widget in controls
-                    if isinstance(widget, ttk.Combobox)
-                    and core.API_PROVIDERS["openai"].label in widget.cget("values")
-                )
-                self.assertNotIn(
-                    core.API_PROVIDERS["custom"].label,
-                    provider_box.cget("values"),
-                )
-                for provider_key in ("google", "moonshot", "qwen", "siliconflow"):
+                provider_menu = dialog.qianyi_provider_menu
+                provider_labels = [
+                    str(provider_menu.entrycget(index, "label")).strip()
+                    for index in range(provider_menu.index("end") + 1)
+                ]
+                for provider_key in (
+                    "volcengine", "openai", "google", "moonshot", "qwen",
+                    "siliconflow", "custom",
+                ):
                     self.assertIn(
                         core.API_PROVIDERS[provider_key].label,
-                        provider_box.cget("values"),
+                        provider_labels,
                     )
-                self.assertNotIn("MiniMax", provider_box.cget("values"))
-                self.assertNotIn("OpenRouter", provider_box.cget("values"))
+                self.assertTrue(all(
+                    provider_menu.entrycget(index, "image")
+                    for index in range(provider_menu.index("end") + 1)
+                ))
+                self.assertNotIn("MiniMax", provider_labels)
+                self.assertNotIn("OpenRouter", provider_labels)
                 self.assertEqual(
                     {*gui.PUBLIC_PROVIDER_KEYS, "connection"},
                     set(app.provider_icons),
@@ -796,13 +798,36 @@ class GuiTests(unittest.TestCase):
                     for widget in controls
                     if isinstance(widget, ttk.Label)
                 ]
-                for label in (
-                    "输出格式", "输出语言", "运行后端",
-                    "本地模型目录",
-                ):
+                for label in ("运行后端", "本地模型目录"):
                     self.assertIn(label, labels)
+                self.assertNotIn("输出格式", labels)
+                self.assertNotIn("输出语言", labels)
+                self.assertFalse(any(
+                    isinstance(widget, ttk.LabelFrame)
+                    and widget.cget("text") == "输出偏好"
+                    for widget in controls
+                ))
+                self.assertFalse(any(
+                    isinstance(widget, ttk.Label)
+                    and "两种后端互斥" in str(widget.cget("text"))
+                    for widget in controls
+                ))
+                self.assertEqual(
+                    "", dialog.qianyi_local_concurrency_note.winfo_manager()
+                )
                 self.assertIn("Base URL", labels)
-                self.assertTrue(any("系统已内置" in value for value in labels))
+                self.assertIn("系统已内置", dialog.qianyi_route_note_var.get())
+                self.assertEqual("", dialog.qianyi_route_label.winfo_manager())
+                self.assertEqual("", dialog.qianyi_route_box.winfo_manager())
+                self.assertFalse(any(
+                    isinstance(widget, ttk.Checkbutton)
+                    and "GitHub 版本更新" in str(widget.cget("text"))
+                    for widget in controls
+                ))
+                self.assertEqual(
+                    "启动后自动检查 GitHub 版本更新",
+                    app.system_auto_update_check.cget("text"),
+                )
                 workspace_labels = [
                     str(widget.cget("text"))
                     for widget in descendants(app.workspace_frame)
@@ -823,28 +848,100 @@ class GuiTests(unittest.TestCase):
                     gui.API_KEY_PORTALS["openai"][1], new=2
                 )
 
+                dialog.update_idletasks()
+                provider_geometry = (
+                    dialog.qianyi_provider_button.winfo_x(),
+                    dialog.qianyi_provider_button.winfo_y(),
+                    dialog.qianyi_provider_button.winfo_width(),
+                )
+                builtin_dialog_height = dialog.winfo_height()
+
+                provider_menu.invoke(
+                    provider_labels.index(core.API_PROVIDERS["custom"].label)
+                )
+                dialog.update()
+                self.assertEqual("custom", dialog.qianyi_provider_key)
+                self.assertEqual(
+                    provider_geometry,
+                    (
+                        dialog.qianyi_provider_button.winfo_x(),
+                        dialog.qianyi_provider_button.winfo_y(),
+                        dialog.qianyi_provider_button.winfo_width(),
+                    ),
+                )
+                self.assertGreater(dialog.winfo_height(), builtin_dialog_height)
+                self.assertGreaterEqual(
+                    dialog.winfo_height(), dialog.winfo_reqheight()
+                )
+                self.assertEqual("normal", str(dialog.qianyi_model_box.cget("state")))
+                self.assertEqual("normal", str(dialog.qianyi_route_box.cget("state")))
+                self.assertEqual("grid", dialog.qianyi_route_label.winfo_manager())
+                self.assertEqual("grid", dialog.qianyi_route_box.winfo_manager())
+                self.assertIn(
+                    "请填写 OpenAI 兼容 Base URL",
+                    dialog.qianyi_route_note_var.get(),
+                )
+                dialog.qianyi_route_box.set("https://custom.example/v1")
+                dialog.qianyi_model_box.set("vision-model-current")
+                provider_menu.invoke(
+                    provider_labels.index(core.API_PROVIDERS["openai"].label)
+                )
+                dialog.update()
+                self.assertEqual(provider_geometry, (
+                    dialog.qianyi_provider_button.winfo_x(),
+                    dialog.qianyi_provider_button.winfo_y(),
+                    dialog.qianyi_provider_button.winfo_width(),
+                ))
+                self.assertEqual(builtin_dialog_height, dialog.winfo_height())
+                self.assertEqual("", dialog.qianyi_route_box.winfo_manager())
+
                 radio_buttons = [
                     widget for widget in controls
                     if isinstance(widget, ttk.Radiobutton)
                 ]
                 next(
                     widget for widget in radio_buttons
-                    if widget.cget("text") == "词组标签"
+                    if widget.cget("text") == "本地模型"
                 ).invoke()
+                dialog.update()
+                local_entry = dialog.qianyi_local_model_entry
+                self.assertEqual("normal", str(local_entry.cget("state")))
+                self.assertEqual(
+                    "pack", dialog.qianyi_local_concurrency_note.winfo_manager()
+                )
+                self.assertIn(
+                    "推荐并发数为 1",
+                    dialog.qianyi_local_concurrency_note.cget("text"),
+                )
+                self.assertEqual(
+                    "disabled", str(dialog.qianyi_provider_button.cget("state"))
+                )
+                self.assertEqual(
+                    "disabled", str(dialog.qianyi_model_box.cget("state"))
+                )
+                self.assertEqual(
+                    "disabled", str(dialog.qianyi_route_box.cget("state"))
+                )
+                self.assertEqual(
+                    "disabled", str(dialog.qianyi_api_key_entry.cget("state"))
+                )
                 next(
                     widget for widget in radio_buttons
-                    if widget.cget("text") == "English"
+                    if widget.cget("text") == "外部 API"
                 ).invoke()
+                dialog.update()
+                self.assertEqual("disabled", str(local_entry.cget("state")))
+                self.assertEqual(
+                    "", dialog.qianyi_local_concurrency_note.winfo_manager()
+                )
+                self.assertEqual(
+                    "normal", str(dialog.qianyi_provider_button.cget("state"))
+                )
+                self.assertEqual("readonly", str(dialog.qianyi_model_box.cget("state")))
                 next(
                     widget for widget in radio_buttons
                     if widget.cget("text") == "本地模型"
                 ).invoke()
-                local_entry = next(
-                    widget for widget in controls
-                    if type(widget) is ttk.Entry
-                    and widget.cget("show") == ""
-                )
-                self.assertEqual("normal", str(local_entry.cget("state")))
                 local_entry.insert(0, r"D:\Models\Vision")
                 save_button = next(
                     widget for widget in controls
@@ -852,12 +949,19 @@ class GuiTests(unittest.TestCase):
                     and widget.cget("text") == "保存设置"
                 )
                 save_button.invoke()
-                self.assertEqual("phrases", app.caption_style_var.get())
-                self.assertEqual("en", app.output_language_var.get())
+                self.assertEqual("natural", app.caption_style_var.get())
+                self.assertEqual("zh", app.output_language_var.get())
                 self.assertEqual("local", app.backend_var.get())
                 self.assertEqual(r"D:\Models\Vision", app.local_model_var.get())
                 self.assertEqual(
                     r"D:\Models\Vision", app.settings["local_model_folder"]
+                )
+                self.assertEqual(
+                    "vision-model-current", app.settings["api_models"]["custom"]
+                )
+                self.assertEqual(
+                    "https://custom.example/v1",
+                    app.settings["api_endpoints"]["custom"],
                 )
                 dialog = None
             finally:

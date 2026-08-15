@@ -48,23 +48,23 @@ class CoreTests(unittest.TestCase):
 
     def test_github_release_version_comparison_and_payload(self):
         self.assertEqual((3, 10, 2), core.version_tuple("release-v3.10.2"))
-        self.assertTrue(core.is_newer_version("v3.6", "3.5"))
+        self.assertTrue(core.is_newer_version("v3.7", "3.6"))
         self.assertFalse(core.is_newer_version("v3.5.0", "3.5"))
         self.assertFalse(core.is_newer_version("invalid", "3.5"))
 
         transport = core.HttpTransport(
             lambda method, url, **kwargs: FakeResponse(
                 payload={
-                    "tag_name": "v3.6",
-                    "name": "芊熠智能打标工作台 v3.6",
-                    "html_url": "https://github.com/example/releases/tag/v3.6",
+                    "tag_name": "v3.7",
+                    "name": "芊熠智能打标工作台 v3.7",
+                    "html_url": "https://github.com/example/releases/tag/v3.7",
                     "published_at": "2026-08-13T10:00:00Z",
                     "body": "- 新增更新检查",
                     "assets": [{
-                        "name": "Qianyi-v3.6-Windows-x64.zip",
+                        "name": "Qianyi-v3.7-Windows-x64.zip",
                         "browser_download_url": (
-                            "https://github.com/example/releases/download/v3.6/"
-                            "Qianyi-v3.6-Windows-x64.zip"
+                            "https://github.com/example/releases/download/v3.7/"
+                            "Qianyi-v3.7-Windows-x64.zip"
                         ),
                         "size": 1234,
                         "digest": "sha256:" + "a" * 64,
@@ -73,12 +73,11 @@ class CoreTests(unittest.TestCase):
                 }
             )
         )
-        with mock.patch.object(core, "APP_VERSION", "3.5"):
-            release = core.check_latest_release(transport)
+        release = core.check_latest_release(transport)
         self.assertTrue(release["is_newer"])
-        self.assertEqual("v3.6", release["tag"])
+        self.assertEqual("v3.7", release["tag"])
         self.assertIn("更新检查", release["notes"])
-        self.assertEqual("Qianyi-v3.6-Windows-x64.zip", release["windows_asset"]["name"])
+        self.assertEqual("Qianyi-v3.7-Windows-x64.zip", release["windows_asset"]["name"])
         self.assertEqual("a" * 64, release["windows_asset"]["sha256"])
 
     def test_openai_compatible_provider_routes_model_and_supported_sampling(self):
@@ -151,19 +150,19 @@ class CoreTests(unittest.TestCase):
         expected = {
             "google": (
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-                "gemini-3.6-flash",
+                "gemini-3.7-flash",
             ),
             "moonshot": (
                 "https://api.moonshot.cn/v1/chat/completions",
-                "kimi-k2.6",
+                "kimi-k3",
             ),
             "qwen": (
                 "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-                "qwen3-vl-plus",
+                "qwen3.8-max",
             ),
             "siliconflow": (
                 "https://api.siliconflow.cn/v1/chat/completions",
-                "zai-org/GLM-4.6V",
+                "Qwen/Qwen3.6-35B-A3B",
             ),
         }
         for provider_key, (url, model) in expected.items():
@@ -173,6 +172,9 @@ class CoreTests(unittest.TestCase):
             self.assertIn(model, provider.model_suggestions)
         self.assertIn("gpt-5.6-sol", core.API_PROVIDERS["openai"].model_suggestions)
         self.assertIn("gpt-5.5", core.API_PROVIDERS["openai"].model_suggestions)
+        self.assertIn("gpt-5.4-nano", core.API_PROVIDERS["openai"].model_suggestions)
+        self.assertIn("custom", core.API_PROVIDERS)
+        self.assertEqual("", core.API_PROVIDERS["custom"].default_model)
         self.assertIn("minimax-m3", core.MODELS)
         self.assertEqual(core.CODING_CHAT_URL, core.MODELS["minimax-m3"].chat_url)
         self.assertNotIn("minimax", core.API_PROVIDERS)
@@ -192,6 +194,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual("GET", calls[0][0])
         self.assertEqual(core.PROVIDER_TEST_URLS["openai"], calls[0][1])
         self.assertEqual("Bearer test-key", calls[0][2]["headers"]["Authorization"])
+
+        calls.clear()
+        result = core.test_provider_connection(
+            "custom",
+            "",
+            core.HttpTransport(sender),
+            api_endpoint="https://example.test/v1",
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("https://example.test/v1/models", calls[0][1])
+        self.assertNotIn("Authorization", calls[0][2]["headers"])
 
     def test_update_package_extracts_valid_executable_and_writes_updater(self):
         import zipfile
@@ -282,6 +295,7 @@ class CoreTests(unittest.TestCase):
         turbo = core.MODELS["seed-2.1-pro-turbo"]
 
         self.assertEqual("doubao-seed-2-1-turbo-260628", turbo.model_id)
+        self.assertEqual("豆包 Seed 2.1 Turbo", turbo.label)
         self.assertEqual(core.CODING_CHAT_URL, turbo.chat_url_for(core.date(2026, 8, 8)))
         self.assertEqual("Coding Plan", turbo.billing_label(core.date(2026, 8, 8)))
         self.assertEqual(core.CODING_CHAT_URL, legacy.chat_url_for(core.date(2026, 8, 7)))

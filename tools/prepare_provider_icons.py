@@ -95,6 +95,9 @@ def main() -> None:
     link = connection_icon()
     link.save(link_path, optimize=True)
     print(f"{link_path} {link.size} alpha={link.getchannel('A').getextrema()}")
+    custom_path = OUTPUT / "custom.png"
+    link.save(custom_path, optimize=True)
+    print(f"{custom_path} {link.size} alpha={link.getchannel('A').getextrema()}")
 
 
 if __name__ == "__main__":

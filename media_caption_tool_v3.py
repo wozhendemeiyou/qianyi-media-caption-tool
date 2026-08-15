@@ -67,6 +67,11 @@ RELEASE_NOTES = (
     "重构画布优先工作区、右侧检查器与固定任务栏",
     "禁用关闭状态下拉框与数值框的滚轮改值，避免滚动页面时误改参数",
     "扩充 OpenAI、Google、月之暗面、千问和硅基流动模型",
+    "新增自定义 OpenAI 兼容 Base URL、模型 ID 与 API Key 配置",
+    "内置供应商仅显示 API Key，自定义接口按需展开 Base URL",
+    "供应商改为带品牌图标的下拉菜单，API 与本地模型互斥置灰",
+    "精简平台设置，并提示本地模型使用单并发以控制显存占用",
+    "自动更新开关迁移到系统说明，更正豆包 Seed 2.1 Turbo 名称",
     "MiniMax M3 已并入火山引擎 Coding Plan",
     "新增按需媒体 Worker、视频预检、自动备份与隐私脱敏诊断包",
     "修复原生文本区在日光与夜光模式往返切换时残留上一主题颜色",
@@ -113,9 +118,8 @@ FOCUS_OPTIONS = {
 }
 FOCUS_LABELS = {value: label for label, value in FOCUS_OPTIONS.items()}
 PROVIDER_LABELS = {provider.label: key for key, provider in API_PROVIDERS.items()}
-# Keep the public configuration focused on providers with a maintained,
-# built-in endpoint. The legacy custom provider remains available in the core
-# for backwards compatibility, but is intentionally not exposed here.
+# Public platform options include maintained built-in routes plus an explicit
+# OpenAI-compatible custom route whose endpoint and model are entered locally.
 PUBLIC_PROVIDER_KEYS = (
     "volcengine",
     "openai",
@@ -123,6 +127,7 @@ PUBLIC_PROVIDER_KEYS = (
     "moonshot",
     "qwen",
     "siliconflow",
+    "custom",
 )
 PUBLIC_PROVIDER_LABELS = {
     API_PROVIDERS[key].label: key for key in PUBLIC_PROVIDER_KEYS
@@ -140,6 +145,7 @@ API_KEY_PORTALS = {
         "SiliconFlow 控制台",
         "https://cloud.siliconflow.cn/account/ak",
     ),
+    "custom": ("自定义接口", ""),
 }
 SAMPLING_PRESETS = {
     "稳定标注": {
@@ -840,6 +846,8 @@ class CaptionApp:
                     )
             except (OSError, RuntimeError, ValueError, tk.TclError):
                 continue
+        if "custom" not in self.provider_icons and "connection" in self.provider_icons:
+            self.provider_icons["custom"] = self.provider_icons["connection"]
 
     def _configure_style(self) -> None:
         style = ttk.Style(self.root)
@@ -977,6 +985,25 @@ class CaptionApp:
             font=("Segoe UI Symbol", 12),
         )
         style.map("Icon.TButton", background=[("active", COLORS["hover"])])
+        style.configure(
+            "Provider.TMenubutton",
+            padding=(10, 6),
+            background=COLORS["input_readonly"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["input_border"],
+            borderwidth=1,
+            relief=tk.FLAT,
+            font=text_font,
+        )
+        style.map(
+            "Provider.TMenubutton",
+            background=[
+                ("disabled", COLORS["input_disabled"]),
+                ("active", COLORS["input_hover"]),
+            ],
+            foreground=[("disabled", COLORS["disabled_fg"])],
+            bordercolor=[("focus", COLORS["input_focus"])],
+        )
         style.configure(
             "DialogClose.TButton",
             padding=(7, 3),
@@ -2842,6 +2869,18 @@ class CaptionApp:
             style="Muted.TLabel",
         ).pack(side=tk.RIGHT)
 
+        self.system_auto_update_var = tk.BooleanVar(
+            value=bool(self.settings.get("auto_check_updates", True))
+        )
+        self.system_auto_update_check = ttk.Checkbutton(
+            version_panel,
+            text="启动后自动检查 GitHub 版本更新",
+            variable=self.system_auto_update_var,
+            command=self._save_auto_update_preference,
+            style="Surface.TCheckbutton",
+        )
+        self.system_auto_update_check.pack(anchor=tk.W, pady=(0, 9))
+
         self.system_release_notes = scrolledtext.ScrolledText(
             version_panel,
             height=8,
@@ -2948,6 +2987,13 @@ class CaptionApp:
         if self.latest_release is not None:
             self._apply_release_to_system_info(self.latest_release)
         self._schedule_theme_sync()
+
+    def _save_auto_update_preference(self) -> None:
+        enabled = bool(self.system_auto_update_var.get())
+        self.settings["auto_check_updates"] = enabled
+        self.settings_store.save(self.settings)
+        if enabled and self.latest_release is None:
+            self.check_for_updates(False)
 
     def show_workspace(self) -> None:
         already_visible = self.workspace_frame.winfo_manager() == "pack"
@@ -4235,91 +4281,64 @@ class CaptionApp:
         dialog = tk.Toplevel(self.root)
         dialog.title("平台设置")
         dialog.transient(self.root)
-        dialog.resizable(False, False)
+        dialog.resizable(False, True)
         frame = ttk.Frame(dialog, padding=20)
         frame.pack(fill=tk.BOTH, expand=True)
 
         settings_heading = self._semantic_heading(
-            frame, "☷", "平台设置", "blue", "任务偏好、模型平台与安全凭据"
+            frame, "☷", "平台设置", "blue", "运行后端、模型平台与安全凭据"
         )
         settings_heading.grid(row=0, column=0, columnspan=3, sticky=tk.EW)
         ttk.Label(
             frame,
-            text="统一设置输出、运行后端、模型与密钥。API Key 仅加密保存在当前 Windows 账户。",
+            text="统一设置运行后端、模型与密钥。API Key 仅加密保存在当前 Windows 账户。",
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(4, 16))
 
-        task_frame = ttk.LabelFrame(frame, text="任务与运行", padding=(12, 10))
-        task_frame.grid(row=2, column=0, columnspan=3, sticky=tk.EW)
-        task_frame.grid_columnconfigure(1, weight=1)
         caption_style_var = tk.StringVar(value=self.caption_style_var.get())
         language_var = tk.StringVar(value=self.output_language_var.get())
         backend_var = tk.StringVar(value=self.backend_var.get())
         local_model_var = tk.StringVar(value=self.local_model_var.get())
-        auto_update_var = tk.BooleanVar(
-            value=bool(self.settings.get("auto_check_updates", True))
-        )
 
-        ttk.Label(task_frame, text="输出格式").grid(row=0, column=0, sticky=tk.W)
-        output_controls = ttk.Frame(task_frame)
-        output_controls.grid(row=0, column=1, columnspan=2, sticky=tk.W, padx=(12, 0))
-        ttk.Radiobutton(
-            output_controls, text="自然语言", value="natural",
-            variable=caption_style_var,
-        ).pack(side=tk.LEFT)
-        ttk.Radiobutton(
-            output_controls, text="词组标签", value="phrases",
-            variable=caption_style_var,
-        ).pack(side=tk.LEFT, padx=(12, 0))
+        backend_heading = self._semantic_heading(
+            frame, "◫", "运行后端与模型", "yellow", "API / LOCAL MODEL"
+        )
+        backend_heading.grid(
+            row=3, column=0, columnspan=3, sticky=tk.EW, pady=(16, 10)
+        )
+        backend_frame = ttk.Frame(frame, style="Surface.TFrame", padding=(12, 10))
+        backend_frame.grid(row=4, column=0, columnspan=3, sticky=tk.EW)
+        backend_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(task_frame, text="输出语言").grid(
-            row=1, column=0, sticky=tk.W, pady=(10, 0)
-        )
-        language_controls = ttk.Frame(task_frame)
-        language_controls.grid(
-            row=1, column=1, columnspan=2, sticky=tk.W, padx=(12, 0), pady=(10, 0)
-        )
-        ttk.Radiobutton(
-            language_controls, text="中文", value="zh", variable=language_var
-        ).pack(side=tk.LEFT)
-        ttk.Radiobutton(
-            language_controls, text="English", value="en", variable=language_var
-        ).pack(side=tk.LEFT, padx=(12, 0))
-
-        ttk.Label(task_frame, text="运行后端").grid(
-            row=2, column=0, sticky=tk.W, pady=(10, 0)
-        )
-        backend_controls = ttk.Frame(task_frame)
+        ttk.Label(
+            backend_frame, text="运行后端", style="Surface.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        backend_controls = ttk.Frame(backend_frame, style="Surface.TFrame")
         backend_controls.grid(
-            row=2, column=1, columnspan=2, sticky=tk.W, padx=(12, 0), pady=(10, 0)
+            row=0, column=1, columnspan=2, sticky=tk.W, padx=(12, 0)
         )
         ttk.Radiobutton(
-            backend_controls, text="外部 API", value="api", variable=backend_var
+            backend_controls, text="外部 API", value="api", variable=backend_var,
+            style="Surface.TRadiobutton",
         ).pack(side=tk.LEFT)
         ttk.Radiobutton(
-            backend_controls, text="本地模型", value="local", variable=backend_var
-        ).pack(side=tk.LEFT, padx=(12, 0))
-
-        ttk.Label(task_frame, text="本地模型目录").grid(
-            row=3, column=0, sticky=tk.W, pady=(10, 0)
+            backend_controls, text="本地模型", value="local", variable=backend_var,
+            style="Surface.TRadiobutton",
+        ).pack(side=tk.LEFT, padx=(16, 0))
+        local_concurrency_note = ttk.Label(
+            backend_controls,
+            text="⚠ 并发越高显存占用越大；本地模型推荐并发数为 1",
+            style="SurfaceMuted.TLabel",
         )
+
+        ttk.Label(
+            backend_frame, text="本地模型目录", style="Surface.TLabel"
+        ).grid(row=1, column=0, sticky=tk.W, pady=(11, 0))
         local_model_entry = ttk.Entry(
-            task_frame, textvariable=local_model_var, width=42
+            backend_frame, textvariable=local_model_var, width=42
         )
         local_model_entry.grid(
-            row=3, column=1, sticky=tk.EW, padx=(12, 8), pady=(10, 0)
-        )
-        ttk.Checkbutton(
-            task_frame,
-            text="启动后自动检查 GitHub 版本更新",
-            variable=auto_update_var,
-        ).grid(
-            row=4,
-            column=1,
-            columnspan=2,
-            sticky=tk.W,
-            padx=(12, 0),
-            pady=(10, 0),
+            row=1, column=1, sticky=tk.EW, padx=(12, 8), pady=(11, 0)
         )
 
         def browse_draft_local_model() -> None:
@@ -4332,118 +4351,145 @@ class CaptionApp:
                 local_model_var.set(selected)
 
         local_model_button = ttk.Button(
-            task_frame, text="选择", command=browse_draft_local_model
+            backend_frame, text="选择", command=browse_draft_local_model
         )
-        local_model_button.grid(row=3, column=2, sticky=tk.E, pady=(10, 0))
+        local_model_button.grid(row=1, column=2, sticky=tk.E, pady=(11, 0))
 
-        def update_backend_controls() -> None:
-            state = tk.NORMAL if backend_var.get() == "local" else tk.DISABLED
-            local_model_entry.configure(state=state)
-            local_model_button.configure(state=state)
-
-        for button in backend_controls.winfo_children():
-            button.configure(command=update_backend_controls)
-        update_backend_controls()
-
+        ttk.Separator(frame).grid(
+            row=5, column=0, columnspan=3, sticky=tk.EW, pady=(14, 0)
+        )
         api_heading = self._semantic_heading(
             frame, "⌁", "API 平台与模型", "violet", "PROVIDER CONNECTION"
         )
         api_heading.grid(
-            row=3, column=0, columnspan=3, sticky=tk.EW, pady=(16, 10)
+            row=6, column=0, columnspan=3, sticky=tk.EW, pady=(12, 10)
         )
-        provider_icon_bar = ttk.Frame(api_heading)
-        provider_icon_bar.pack(side=tk.RIGHT)
-        provider_icon_buttons = {}
-        provider_icon_tooltips = []
-        for provider_key in PUBLIC_PROVIDER_KEYS:
-            button = ttk.Button(
-                provider_icon_bar,
-                image=self.provider_icons.get(provider_key, ""),
-                style="Icon.TButton",
-                width=3,
-            )
-            button.pack(side=tk.LEFT, padx=(4, 0))
-            provider_icon_buttons[provider_key] = button
-            provider_icon_tooltips.append(
-                ToolTip(button, API_PROVIDERS[provider_key].label)
-            )
-
         current_provider_key = self._provider_key()
         if current_provider_key not in PUBLIC_PROVIDER_KEYS:
             current_provider_key = DEFAULT_PROVIDER_KEY
         provider_var = tk.StringVar(
             value=API_PROVIDERS[current_provider_key].label
         )
-        provider_identity = ttk.Label(
-            frame,
-            text="API 平台",
+        api_frame = ttk.Frame(frame, style="Surface.TFrame", padding=(12, 10))
+        api_frame.grid(row=7, column=0, columnspan=3, sticky=tk.EW)
+        api_frame.grid_columnconfigure(0, weight=0, minsize=168)
+        api_frame.grid_columnconfigure(1, weight=1, minsize=440)
+        api_frame.grid_columnconfigure(2, weight=0, minsize=180)
+
+        ttk.Label(
+            api_frame, text="API 平台", style="Surface.TLabel"
+        ).grid(row=0, column=0, sticky=tk.W)
+        provider_host = ttk.Frame(
+            api_frame,
+            style="Surface.TFrame",
+            width=420,
+            height=48,
+        )
+        provider_host.grid(row=0, column=1, sticky=tk.W, padx=(12, 8))
+        provider_host.grid_propagate(False)
+        provider_button = ttk.Menubutton(
+            provider_host,
+            textvariable=provider_var,
             image=self.provider_icons.get(current_provider_key, ""),
             compound=tk.LEFT,
+            style="Provider.TMenubutton",
         )
-        provider_identity.grid(row=4, column=0, sticky=tk.W)
-        provider_box = ttk.Combobox(
-            frame,
-            textvariable=provider_var,
-            state="readonly",
-            values=[API_PROVIDERS[key].label for key in PUBLIC_PROVIDER_KEYS],
-            width=28,
+        provider_button.place(x=0, y=0, width=420, height=48)
+        provider_menu = tk.Menu(
+            provider_button,
+            tearoff=False,
+            background=COLORS["input_bg"],
+            foreground=COLORS["text"],
+            activebackground=COLORS["selection"],
+            activeforeground=COLORS["text"],
+            borderwidth=1,
+            relief=tk.FLAT,
+            activeborderwidth=0,
+            font=(UI_FONT, 10),
         )
-        provider_box.grid(row=4, column=1, sticky=tk.EW, padx=(12, 8))
+        provider_button.configure(menu=provider_menu)
 
-        portal_button = ttk.Button(frame, text="获取 API Key ↗", width=15)
-        portal_button.grid(row=4, column=2, sticky=tk.E)
+        portal_button = ttk.Button(api_frame, text="获取 API Key ↗", width=17)
+        portal_button.grid(row=0, column=2, sticky=tk.E)
 
-        ttk.Label(frame, text="模型").grid(row=5, column=0, sticky=tk.W, pady=(12, 0))
+        ttk.Label(
+            api_frame, text="模型", style="Surface.TLabel"
+        ).grid(row=1, column=0, sticky=tk.W, pady=(12, 0))
         model_var = tk.StringVar()
         model_box = ttk.Combobox(
-            frame, textvariable=model_var, state="readonly", width=44
+            api_frame, textvariable=model_var, state="readonly", width=44
         )
         model_box.grid(
-            row=5, column=1, columnspan=2, sticky=tk.EW, padx=(12, 0), pady=(12, 0)
+            row=1, column=1, columnspan=2, sticky=tk.EW, padx=(12, 0), pady=(12, 0)
         )
 
-        ttk.Label(frame, text="Base URL").grid(
-            row=6, column=0, sticky=tk.W, pady=(12, 0)
+        route_label = ttk.Label(
+            api_frame, text="Base URL", style="Surface.TLabel"
         )
-        route_var = tk.StringVar(value="系统已内置 · 无需填写")
+        route_label.grid(row=2, column=0, sticky=tk.W, pady=(12, 0))
+        route_var = tk.StringVar()
+        route_box = ttk.Combobox(
+            api_frame, textvariable=route_var, state="readonly", width=44
+        )
+        route_box.grid(
+            row=2, column=1, columnspan=2, sticky=tk.EW, padx=(12, 0), pady=(12, 0)
+        )
+        route_note_var = tk.StringVar()
+        route_note_label = ttk.Label(
+            api_frame,
+            textvariable=route_note_var,
+            style="SurfaceMuted.TLabel",
+            wraplength=560,
+            justify=tk.LEFT,
+        )
+        route_note_label.grid(
+            row=3, column=1, columnspan=2, sticky=tk.W, padx=(12, 0), pady=(6, 0)
+        )
+
+        ttk.Separator(api_frame).grid(
+            row=4, column=0, columnspan=3, sticky=tk.EW, pady=16
+        )
         ttk.Label(
-            frame, textvariable=route_var, style="Muted.TLabel"
-        ).grid(
-            row=6, column=1, columnspan=2, sticky=tk.W, padx=(12, 0), pady=(12, 0)
-        )
-
-        ttk.Separator(frame).grid(
-            row=7, column=0, columnspan=3, sticky=tk.EW, pady=16
-        )
-        key_label_var = tk.StringVar()
-        ttk.Label(frame, textvariable=key_label_var).grid(row=8, column=0, sticky=tk.W)
+            api_frame, text="API Key", style="Surface.TLabel"
+        ).grid(row=5, column=0, sticky=tk.W)
         api_key_var = tk.StringVar()
-        entry = ttk.Entry(frame, textvariable=api_key_var, width=38, show="•")
+        entry = ttk.Entry(api_frame, textvariable=api_key_var, width=38, show="•")
         entry.grid(
-            row=8, column=1, padx=(12, 8), sticky=tk.EW
+            row=5, column=1, padx=(12, 8), sticky=tk.EW
         )
         connection_test_button = ttk.Button(
-            frame,
+            api_frame,
             text="测试连接",
             image=self.provider_icons.get("connection", ""),
             compound=tk.LEFT,
             width=15,
         )
-        connection_test_button.grid(row=8, column=2, sticky=tk.E)
+        connection_test_button.grid(row=5, column=2, sticky=tk.E)
         stored_var = tk.StringVar()
         ttk.Label(
-            frame, textvariable=stored_var, style="Muted.TLabel"
+            api_frame, textvariable=stored_var, style="SurfaceMuted.TLabel"
         ).grid(
-            row=9, column=1, sticky=tk.W, padx=(12, 0), pady=(6, 0)
+            row=6, column=1, sticky=tk.W, padx=(12, 0), pady=(6, 0)
         )
         connection_state_var = tk.StringVar(value="●  尚未测试")
         connection_state_label = ttk.Label(
-            frame,
+            api_frame,
             textvariable=connection_state_var,
             style="Muted.TLabel",
         )
-        connection_state_label.grid(row=9, column=2, sticky=tk.E, pady=(6, 0))
+        connection_state_label.grid(row=6, column=2, sticky=tk.E, pady=(6, 0))
         frame.grid_columnconfigure(1, weight=1)
+
+        dialog.qianyi_provider_button = provider_button
+        dialog.qianyi_provider_menu = provider_menu
+        dialog.qianyi_provider_keys = PUBLIC_PROVIDER_KEYS
+        dialog.qianyi_model_box = model_box
+        dialog.qianyi_route_label = route_label
+        dialog.qianyi_route_box = route_box
+        dialog.qianyi_route_note_var = route_note_var
+        dialog.qianyi_local_model_entry = local_model_entry
+        dialog.qianyi_local_concurrency_note = local_concurrency_note
+        dialog.qianyi_api_key_entry = entry
 
         selected_models = dict(self.api_model_by_provider)
         selected_models[DEFAULT_PROVIDER_KEY] = MODELS[
@@ -4451,12 +4497,28 @@ class CaptionApp:
         ].label
         if current_provider_key != DEFAULT_PROVIDER_KEY:
             selected_models[current_provider_key] = self.model_label_var.get()
+        selected_endpoints = dict(self.api_endpoint_by_provider)
+        current_endpoint = self.custom_endpoint_var.get().strip()
+        if current_endpoint:
+            selected_endpoints[current_provider_key] = current_endpoint
         state = {
             "provider_key": current_provider_key,
             "placeholder": "",
             "draft_keys": {},
             "selected_models": selected_models,
+            "selected_endpoints": selected_endpoints,
+            "layout_ready": False,
         }
+
+        def resize_dialog_to_content() -> None:
+            """Fit dynamic provider fields without moving the selector unnecessarily."""
+            if not state["layout_ready"] or not dialog.winfo_exists():
+                return
+            dialog.update_idletasks()
+            target_width = max(dialog.winfo_width(), dialog.winfo_reqwidth())
+            target_height = max(1, dialog.winfo_reqheight())
+            dialog.geometry(f"{target_width}x{target_height}")
+            dialog.update_idletasks()
 
         def capture_current() -> None:
             provider_key = state["provider_key"]
@@ -4466,9 +4528,15 @@ class CaptionApp:
             model = model_var.get().strip()
             if model:
                 state["selected_models"][provider_key] = model
+            endpoint = route_var.get().strip()
+            if endpoint:
+                state["selected_endpoints"][provider_key] = endpoint
+            else:
+                state["selected_endpoints"].pop(provider_key, None)
 
         def update_route(_event=None) -> None:
             provider_key = state["provider_key"]
+            provider = API_PROVIDERS[provider_key]
             if provider_key == DEFAULT_PROVIDER_KEY:
                 model_key = next(
                     (
@@ -4478,26 +4546,46 @@ class CaptionApp:
                     ),
                     DEFAULT_MODEL_KEY,
                 )
-                billing = MODELS[model_key].billing_label()
+                model = MODELS[model_key]
+                billing = model.billing_label()
+                endpoint = model.chat_url_for()
+                route_var.set(endpoint)
+                state["selected_endpoints"][provider_key] = endpoint
+            elif provider_key == "custom":
+                billing = provider.billing
+                state["selected_endpoints"][provider_key] = route_var.get().strip()
             else:
-                billing = API_PROVIDERS[provider_key].billing
-            route_var.set(f"系统已内置 · 自动路由 · {billing}")
-
-        def load_provider_key(_event=None) -> None:
-            if _event is not None:
-                capture_current()
-            provider_key = PUBLIC_PROVIDER_LABELS.get(
-                provider_var.get(), DEFAULT_PROVIDER_KEY
+                billing = provider.billing
+                route_var.set(provider.chat_url)
+                state["selected_endpoints"][provider_key] = provider.chat_url
+            route_note_var.set(
+                "请填写 OpenAI 兼容 Base URL 与模型 ID，例如 https://host/v1"
+                if provider_key == "custom"
+                else f"系统已内置 Base URL · {billing}"
             )
+
+        def update_route_visibility() -> None:
+            if state["provider_key"] == "custom":
+                route_label.grid()
+                route_box.grid()
+                route_note_label.grid()
+            else:
+                route_label.grid_remove()
+                route_box.grid_remove()
+                route_note_label.grid_remove()
+            resize_dialog_to_content()
+
+        def load_provider_key() -> None:
+            provider_key = state["provider_key"]
             provider = API_PROVIDERS[provider_key]
-            state["provider_key"] = provider_key
             dialog.qianyi_provider_key = provider_key
-            provider_identity.configure(
+            provider_var.set(provider.label)
+            provider_button.configure(
                 image=self.provider_icons.get(provider_key, "")
             )
             connection_state_var.set("●  尚未测试")
             connection_state_label.configure(style="Muted.TLabel")
-            connection_test_button.configure(state=tk.NORMAL, text="测试连接")
+            connection_test_button.configure(text="测试连接")
             stored_key = self.settings_store.get_api_key(provider_key)
             has_key = bool(stored_key)
             if provider_key in state["draft_keys"]:
@@ -4507,12 +4595,15 @@ class CaptionApp:
                 placeholder = "*" * 16 if has_key else ""
                 key_value = placeholder
             state["placeholder"] = placeholder
-            key_label_var.set(f"{provider.label} API Key")
             api_key_var.set(key_value)
             stored_var.set(
                 "已使用 Windows DPAPI 安全保存（脱敏显示）"
                 if has_key and provider_key not in state["draft_keys"]
-                else ("待保存" if key_value else "未设置")
+                else (
+                    "待保存"
+                    if key_value
+                    else ("可选，未设置" if provider_key == "custom" else "未设置")
+                )
             )
             if provider_key == DEFAULT_PROVIDER_KEY:
                 values = [model.label for model in MODELS.values()]
@@ -4529,36 +4620,53 @@ class CaptionApp:
                 )
             model_box.configure(values=values)
             model_var.set(selected)
-            portal_button.configure(
-                text=f"前往 {API_KEY_PORTALS[provider_key][0]} ↗"
+            route_box.configure(values=provider.endpoint_suggestions)
+            route_var.set(
+                state["selected_endpoints"].get(provider_key)
+                or self._default_endpoint(provider_key)
             )
+            if provider_key == "custom":
+                portal_button.configure(text="自定义接口", state=tk.DISABLED)
+            else:
+                portal_button.configure(
+                    text=f"前往 {API_KEY_PORTALS[provider_key][0]} ↗"
+                )
             update_route()
+            update_route_visibility()
+            update_backend_controls()
             if placeholder:
                 entry.selection_range(0, tk.END)
 
         def choose_provider(provider_key: str) -> None:
             capture_current()
-            provider_var.set(API_PROVIDERS[provider_key].label)
+            state["provider_key"] = provider_key
             load_provider_key()
 
-        for provider_key, button in provider_icon_buttons.items():
-            button.configure(
-                command=lambda key=provider_key: choose_provider(key)
+        for provider_key in PUBLIC_PROVIDER_KEYS:
+            provider_menu.add_command(
+                label=f"  {API_PROVIDERS[provider_key].label}",
+                image=self.provider_icons.get(provider_key, ""),
+                compound=tk.LEFT,
+                command=lambda key=provider_key: choose_provider(key),
             )
 
-        provider_box.bind("<<ComboboxSelected>>", load_provider_key)
         model_box.bind("<<ComboboxSelected>>", update_route)
+        route_box.bind("<<ComboboxSelected>>", capture_current)
+        route_box.bind("<FocusOut>", capture_current)
 
         def open_key_portal() -> None:
             provider_key = state["provider_key"]
+            portal_url = API_KEY_PORTALS[provider_key][1]
+            if not portal_url:
+                return
             try:
-                opened = webbrowser.open(API_KEY_PORTALS[provider_key][1], new=2)
+                opened = webbrowser.open(portal_url, new=2)
             except (OSError, webbrowser.Error):
                 opened = False
             if not opened:
                 messagebox.showerror(
                     "无法打开浏览器",
-                    f"请在浏览器中访问：\n{API_KEY_PORTALS[provider_key][1]}",
+                    f"请在浏览器中访问：\n{portal_url}",
                     parent=dialog,
                 )
 
@@ -4571,8 +4679,13 @@ class CaptionApp:
                 secret = typed_value
             else:
                 secret = self.settings_store.get_api_key(provider_key)
-            if not secret:
+            endpoint = route_var.get().strip()
+            if not secret and provider_key != "custom":
                 connection_state_var.set("●  请先填写 API Key")
+                connection_state_label.configure(style="StatusError.TLabel")
+                return
+            if provider_key == "custom" and not endpoint:
+                connection_state_var.set("●  请先填写 Base URL")
                 connection_state_label.configure(style="StatusError.TLabel")
                 return
             connection_test_button.configure(state=tk.DISABLED, text="测试中…")
@@ -4581,7 +4694,11 @@ class CaptionApp:
 
             def worker() -> None:
                 try:
-                    result = test_provider_connection(provider_key, secret)
+                    result = test_provider_connection(
+                        provider_key,
+                        secret,
+                        api_endpoint=endpoint,
+                    )
                     payload = {"ok": True, **result}
                 except Exception as error:
                     payload = {"ok": False, "error": str(error)}
@@ -4600,6 +4717,49 @@ class CaptionApp:
             threading.Thread(
                 target=worker, daemon=True, name=f"provider-test-{provider_key}"
             ).start()
+
+        def update_backend_controls() -> None:
+            is_local = backend_var.get() == "local"
+            provider_key = state["provider_key"]
+            provider = API_PROVIDERS[provider_key]
+            local_state = tk.NORMAL if is_local else tk.DISABLED
+            api_state = tk.DISABLED if is_local else tk.NORMAL
+            local_model_entry.configure(state=local_state)
+            local_model_button.configure(state=local_state)
+            provider_button.configure(state=api_state)
+            if is_local:
+                if not local_concurrency_note.winfo_manager():
+                    local_concurrency_note.pack(side=tk.LEFT, padx=(14, 0))
+            else:
+                local_concurrency_note.pack_forget()
+            model_box.configure(
+                state=(
+                    tk.DISABLED
+                    if is_local
+                    else (tk.NORMAL if provider.allows_custom_endpoint else "readonly")
+                )
+            )
+            route_box.configure(
+                state=(
+                    tk.DISABLED
+                    if is_local
+                    else (tk.NORMAL if provider.allows_custom_endpoint else "readonly")
+                )
+            )
+            entry.configure(state=api_state)
+            connection_test_button.configure(state=api_state)
+            portal_button.configure(
+                state=(
+                    tk.NORMAL
+                    if not is_local and API_KEY_PORTALS[provider_key][1]
+                    else tk.DISABLED
+                )
+            )
+            resize_dialog_to_content()
+
+        for button in backend_controls.winfo_children():
+            if isinstance(button, ttk.Radiobutton):
+                button.configure(command=update_backend_controls)
 
         connection_test_button.configure(command=test_connection)
         load_provider_key()
@@ -4645,10 +4805,20 @@ class CaptionApp:
                 elif provider_key in PUBLIC_PROVIDER_KEYS and model_value:
                     self.api_model_by_provider[provider_key] = model_value
 
+            self.api_endpoint_by_provider = {
+                provider_key: endpoint.strip()
+                for provider_key, endpoint in state["selected_endpoints"].items()
+                if provider_key in PUBLIC_PROVIDER_KEYS and endpoint.strip()
+            }
+
             provider = API_PROVIDERS[state["provider_key"]]
             self.provider_label_var.set(provider.label)
             self.settings["provider_key"] = provider.key
             self.settings["api_models"] = dict(self.api_model_by_provider)
+            self.settings["api_endpoints"] = dict(self.api_endpoint_by_provider)
+            self.settings["custom_api_endpoint"] = self.api_endpoint_by_provider.get(
+                "custom", ""
+            )
             self._active_provider_key = None
             self._provider_changed()
             self.caption_style_var.set(caption_style_var.get())
@@ -4661,24 +4831,24 @@ class CaptionApp:
                 "output_language": self.output_language_var.get(),
                 "backend": self.backend_var.get(),
                 "local_model_folder": self.local_model_var.get(),
-                "auto_check_updates": bool(auto_update_var.get()),
             })
             self.settings_store.save(self.settings)
             close_dialog()
             self.log(f"平台设置已保存：{provider.label} / {self._api_model()}")
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=10, column=0, columnspan=3, sticky=tk.E, pady=(18, 0))
+        buttons.grid(row=8, column=0, columnspan=3, sticky=tk.E, pady=(18, 0))
         ttk.Button(buttons, text="清除密钥", command=clear_key).pack(side=tk.LEFT)
         ttk.Button(buttons, text="取消", command=close_dialog).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(
             buttons, text="保存设置", style="Primary.TButton", command=save
         ).pack(side=tk.LEFT, padx=(6, 0))
         center_dialog(dialog, self.root)
+        state["layout_ready"] = True
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
         dialog.grab_set()
         dialog.lift()
-        provider_box.focus_set()
+        model_box.focus_set()
         return dialog
 
     def open_settings(self) -> tk.Toplevel:

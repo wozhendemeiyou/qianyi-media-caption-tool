@@ -2,6 +2,18 @@
 
 本文件记录芊熠智能打标工作台每个公开版本的主要变化。日期均使用北京时间。
 
+## [3.6.0] - 2026-08-15
+
+- 平台设置新增自定义 OpenAI 兼容接口，可填写 Base URL、模型 ID 和可选 API Key。
+- 内置供应商仅显示 API Key；只有自定义接口会展开 Base URL，切换供应商时选择框不再跳动。
+- 供应商选择改为带品牌图标的菜单，并增大选项行高与间距。
+- 运行后端、本地模型和 API 平台重新分区；外部 API 与本地模型会互斥置灰。
+- 精简平台设置，移除重复的输出偏好和后端互斥说明；选择本地模型时提示显存风险并推荐单并发。
+- 修复自定义接口展开后窗口高度未更新、底部 API Key 与操作区显示不完整的问题。
+- 自动检查更新开关迁移到“系统说明 → 版本信息”。
+- 更新 OpenAI、Google Gemini、Kimi、千问与 SiliconFlow 的近期视觉模型列表。
+- 更正“豆包 Seed 2.1 Pro Turbo”为官方名称“豆包 Seed 2.1 Turbo”，接口 ID 保持 `doubao-seed-2-1-turbo-260628`。
+
 ## [3.5.0] - 2026-08-14
 
 ### 工作区与视觉
@@ -65,6 +77,7 @@
 - API Key 使用 Windows DPAPI 加密，本地视觉语言模型可选单并发运行。
 - 44 项自动化测试与标准离线压力测试通过。
 
+[3.6.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6
 [3.5.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.5
 [3.4.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.4
 [3.3.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.3

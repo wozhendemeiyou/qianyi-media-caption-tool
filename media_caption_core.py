@@ -36,7 +36,7 @@ from media_caption_worker import (
 
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.5"
+APP_VERSION = "3.6"
 GITHUB_REPOSITORY = "wozhendemeiyou/qianyi-media-caption-tool"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = (
@@ -148,7 +148,7 @@ MODELS = {
     ),
     "seed-2.1-pro-turbo": ModelOption(
         "seed-2.1-pro-turbo",
-        "豆包 Seed 2.1 Pro Turbo",
+        "豆包 Seed 2.1 Turbo",
         "doubao-seed-2-1-turbo-260628",
         CODING_CHAT_URL,
         "Coding Plan",
@@ -206,9 +206,9 @@ API_PROVIDERS = {
             "gpt-5.6-luna",
             "gpt-5.6",
             "gpt-5.5",
-            "gpt-5.5-pro",
             "gpt-5.4",
             "gpt-5.4-mini",
+            "gpt-5.4-nano",
             "gpt-4.1",
             "gpt-4.1-mini",
         ),
@@ -223,13 +223,15 @@ API_PROVIDERS = {
         "google",
         "Google Gemini",
         "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        "gemini-3.6-flash",
+        "gemini-3.7-flash",
         (
+            "gemini-3.7-flash",
             "gemini-3.6-flash",
-            "gemini-3.5",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3.1-pro-preview",
             "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
         ),
@@ -243,13 +245,12 @@ API_PROVIDERS = {
         "moonshot",
         "月之暗面 Kimi",
         "https://api.moonshot.cn/v1/chat/completions",
-        "kimi-k2.6",
+        "kimi-k3",
         (
+            "kimi-k3",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.7-code",
             "kimi-k2.6",
-            "kimi-k2.5",
-            "moonshot-v1-128k-vision-preview",
-            "moonshot-v1-32k-vision-preview",
-            "moonshot-v1-8k-vision-preview",
         ),
         "按量计费",
         frozenset({
@@ -262,14 +263,17 @@ API_PROVIDERS = {
         "qwen",
         "阿里云百炼 · 千问",
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        "qwen3-vl-plus",
+        "qwen3.8-max",
         (
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen3.7-flash",
+            "qwen3.6-plus",
+            "qwen3.6-flash",
+            "qwen3.5-omni-plus",
+            "qwen3.5-omni-flash",
             "qwen3-vl-plus",
             "qwen3-vl-flash",
-            "qwen3-vl-235b-a22b-instruct",
-            "qwen3-vl-235b-a22b-thinking",
-            "qwen-vl-max",
-            "qwen-vl-plus",
         ),
         "按量计费",
         frozenset({"max_tokens", "temperature", "top_p", "top_k", "seed"}),
@@ -282,12 +286,15 @@ API_PROVIDERS = {
         "siliconflow",
         "硅基流动 SiliconFlow",
         "https://api.siliconflow.cn/v1/chat/completions",
-        "zai-org/GLM-4.6V",
+        "Qwen/Qwen3.6-35B-A3B",
         (
-            "zai-org/GLM-4.6V",
-            "zai-org/GLM-4.5V",
-            "Qwen/Qwen2.5-VL-72B-Instruct",
-            "Qwen/Qwen2.5-VL-32B-Instruct",
+            "Qwen/Qwen3.6-35B-A3B",
+            "Qwen/Qwen3.6-27B",
+            "Qwen/Qwen3.5-397B-A17B",
+            "Qwen/Qwen3-VL-32B-Instruct",
+            "moonshotai/Kimi-K2.7-Code",
+            "Pro/moonshotai/Kimi-K2.6",
+            "nex-agi/Nex-N2-Pro",
         ),
         "按量计费",
         frozenset({"max_tokens", "temperature", "top_p", "top_k", "seed"}),
@@ -295,10 +302,10 @@ API_PROVIDERS = {
     ),
     "custom": ApiProviderOption(
         "custom",
-        "自定义兼容接口",
+        "自定义 OpenAI 兼容接口",
         "",
-        "gpt-4.1-mini",
-        ("gpt-4.1-mini", "Qwen/Qwen2.5-VL-72B-Instruct", "google/gemini-2.5-flash"),
+        "",
+        (),
         "由服务商决定",
         frozenset({
             "max_tokens", "temperature", "top_p", "top_k",
@@ -306,10 +313,7 @@ API_PROVIDERS = {
         }),
         supports_video=True,
         allows_custom_endpoint=True,
-        endpoint_suggestions=(
-            "http://127.0.0.1:8000/v1/chat/completions",
-            "http://127.0.0.1:11434/v1/chat/completions",
-        ),
+        endpoint_suggestions=(),
     ),
 }
 DEFAULT_PROVIDER_KEY = "volcengine"
@@ -894,31 +898,46 @@ def extract_update_executable(asset_path: Path, destination_dir: Path) -> Path:
     return target
 
 
+def provider_models_url(provider_key: str, api_endpoint: str = "") -> str:
+    if provider_key in PROVIDER_TEST_URLS:
+        return PROVIDER_TEST_URLS[provider_key]
+    if provider_key != "custom":
+        raise ValueError("当前平台不支持连接测试")
+    endpoint = str(api_endpoint or "").strip().rstrip("/")
+    if not endpoint:
+        raise ValueError("请先填写自定义 Base URL")
+    if not endpoint.casefold().startswith(("http://", "https://")):
+        raise ValueError("Base URL 必须以 http:// 或 https:// 开头")
+    endpoint = endpoint.removesuffix("/chat/completions")
+    return f"{endpoint}/models"
+
+
 def test_provider_connection(
     provider_key: str,
     api_key: str,
     transport: "HttpTransport | None" = None,
     timeout: float = 10.0,
+    api_endpoint: str = "",
 ) -> dict[str, Any]:
     """Validate credentials using a non-generating model-list request."""
-    if provider_key not in PROVIDER_TEST_URLS:
-        raise ValueError("当前平台不支持连接测试")
     secret = str(api_key or "").strip()
-    if not secret:
+    if not secret and provider_key != "custom":
         raise ValueError("请先填写 API Key")
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"Qianyi-Media-Caption-Tool/{APP_VERSION}",
+    }
+    if secret:
+        headers["Authorization"] = f"Bearer {secret}"
     started = time.monotonic()
     response = (transport or HttpTransport()).request(
         "GET",
-        PROVIDER_TEST_URLS[provider_key],
+        provider_models_url(provider_key, api_endpoint),
         token=CancellationToken(),
         api_key=secret,
         attempts=1,
         timeout=(5, timeout),
-        headers={
-            "Authorization": f"Bearer {secret}",
-            "Accept": "application/json",
-            "User-Agent": f"Qianyi-Media-Caption-Tool/{APP_VERSION}",
-        },
+        headers=headers,
     )
     return {
         "ok": True,
