@@ -954,6 +954,7 @@ def create_windows_update_script(
     directory: Path | None = None,
     *,
     restart: bool = True,
+    bootloader_pid: int | None = None,
 ) -> Path:
     """Create a one-shot PowerShell updater that runs after this process exits."""
     source = Path(update_executable).resolve()
@@ -973,7 +974,20 @@ def create_windows_update_script(
     staged = target.with_name(f".{target.stem}-update-{int(parent_pid)}.exe")
     expected_hash = hashlib.sha256(source.read_bytes()).hexdigest().upper()
     target_parent = target.parent
+    wait_pids = [int(parent_pid)]
+    if bootloader_pid is not None:
+        candidate = int(bootloader_pid)
+        if candidate > 0 and candidate not in wait_pids:
+            wait_pids.append(candidate)
+    wait_commands = "\n".join(
+        f"    Wait-Process -Id {pid} -ErrorAction SilentlyContinue"
+        for pid in wait_pids
+    )
+    wait_label = ", ".join(str(pid) for pid in wait_pids)
     restart_command = (
+        "    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'\n"
+        "    Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | "
+        "Remove-Item -ErrorAction SilentlyContinue\n"
         f"    Start-Process -FilePath $target -WorkingDirectory '{quoted(target_parent)}'\n"
         if restart
         else ""
@@ -987,8 +1001,9 @@ $expectedHash = '{expected_hash}'
 $succeeded = $false
 $exitCode = 0
 try {{
-    "[$(Get-Date -Format o)] Waiting for application process {int(parent_pid)}" | Set-Content -LiteralPath $log -Encoding UTF8
-    Wait-Process -Id {int(parent_pid)} -ErrorAction SilentlyContinue
+    "[$(Get-Date -Format o)] Waiting for application processes {wait_label}" | Set-Content -LiteralPath $log -Encoding UTF8
+{wait_commands}
+    Start-Sleep -Milliseconds 750
     Copy-Item -LiteralPath $source -Destination $staged -Force
     $stagedHash = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash
     if ($stagedHash -ne $expectedHash) {{
@@ -1022,6 +1037,8 @@ def launch_windows_update_installer(script: Path) -> subprocess.Popen:
     updater = Path(script).resolve()
     if not updater.is_file() or updater.suffix.casefold() != ".ps1":
         raise ValueError("更新脚本路径无效")
+    clean_environment = os.environ.copy()
+    clean_environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return subprocess.Popen(
         [
             "powershell.exe",
@@ -1038,6 +1055,7 @@ def launch_windows_update_installer(script: Path) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
+        env=clean_environment,
     )
 
 

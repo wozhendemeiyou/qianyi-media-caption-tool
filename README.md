@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-74%20passed-35B46F)](./tests)
+[![Tests](https://img.shields.io/badge/Tests-75%20passed-35B46F)](./tests)
 [![Version](https://img.shields.io/badge/Release-v3.6.3-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
@@ -156,6 +156,7 @@ dataset/
 - “删除项目”只删除应用自身的项目元数据，绝不递归删除媒体目录。
 - 默认在真实启动后异步访问 GitHub 公共 Releases API 检查版本，不发送 API Key、项目路径或任何用户数据；可在平台设置中关闭。
 - 用户确认后，软件从官方 GitHub Release 下载 Windows EXE/ZIP，校验体积、ZIP 完整性、EXE 格式和 Release SHA-256（如提供），退出后由独立更新器覆盖并重启。
+- 独立更新器会切断旧 PyInstaller `_MEI` 运行环境，并等待旧版单文件进程完成清理，避免立即升级后出现 `python312.dll` 加载失败。
 - 自动更新不会删除 API Key、项目记录或数据集；源码运行模式不会覆盖 Python 环境。
 
 ## 下载与运行

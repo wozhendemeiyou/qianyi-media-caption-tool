@@ -62,6 +62,7 @@ LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
 RELEASE_NOTES = (
     "为 Windows EXE 补充公司名、产品名、版本号与版权信息",
+    "修复旧版立即更新后继承失效 _MEI 目录导致 Python DLL 加载失败",
     "二次打标完成后立即覆盖刷新当前标注结果与 TXT",
     "结果区新增生成中、已更新、失败保留和单项耗时反馈",
     "采用现代包豪斯日光模式与灰绿色夜光模式",
@@ -3246,8 +3247,18 @@ class CaptionApp:
                 write_test = target.parent / ".qianyi-update-write-test"
                 write_test.write_bytes(b"ok")
                 write_test.unlink(missing_ok=True)
+                runtime_home = Path(str(getattr(sys, "_MEIPASS", "")))
+                bootloader_pid = (
+                    os.getppid()
+                    if runtime_home.name.upper().startswith("_MEI")
+                    else None
+                )
                 script = create_windows_update_script(
-                    executable, target, os.getpid(), update_dir
+                    executable,
+                    target,
+                    os.getpid(),
+                    update_dir,
+                    bootloader_pid=bootloader_pid,
                 )
                 self._post_event(
                     "update_download_ready",

@@ -257,13 +257,33 @@ class CoreTests(unittest.TestCase):
             installed.parent.mkdir()
             installed.write_bytes(b"MZold")
             script = core.create_windows_update_script(
-                extracted, installed, 12345, root / "updater"
+                extracted,
+                installed,
+                12345,
+                root / "updater",
+                bootloader_pid=54321,
             )
             script_text = script.read_text(encoding="utf-8-sig")
             self.assertIn("Wait-Process -Id 12345", script_text)
+            self.assertIn("Wait-Process -Id 54321", script_text)
+            self.assertIn("Start-Sleep -Milliseconds 750", script_text)
             self.assertIn("Copy-Item -LiteralPath", script_text)
             self.assertIn("Get-FileHash -LiteralPath $staged", script_text)
+            self.assertIn(
+                "$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", script_text
+            )
+            self.assertIn("$_.Name -like '_PYI_*'", script_text)
             self.assertIn("Start-Process -FilePath $target -WorkingDirectory", script_text)
+
+    def test_update_launcher_resets_pyinstaller_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "install-qianyi-update.ps1"
+            script.write_text("exit 0", encoding="utf-8")
+            process = mock.Mock()
+            with mock.patch.object(core.subprocess, "Popen", return_value=process) as popen:
+                self.assertIs(process, core.launch_windows_update_installer(script))
+            environment = popen.call_args.kwargs["env"]
+            self.assertEqual("1", environment["PYINSTALLER_RESET_ENVIRONMENT"])
 
     @unittest.skipUnless(core.os.name == "nt", "Windows updater integration")
     def test_windows_update_launcher_replaces_target_without_detached_process(self):
