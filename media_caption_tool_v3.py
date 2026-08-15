@@ -44,6 +44,7 @@ from media_caption_core import (
     has_usable_caption,
     load_project_summary,
     load_incomplete_paths,
+    launch_windows_update_installer,
     maybe_create_automatic_backup,
     normalize_sampling,
     open_image,
@@ -64,6 +65,7 @@ RELEASE_NOTES = (
     "统一 HarmonyOS Sans SC 字体层级并减少冗余粗体",
     "新增语义标题图标、系统说明与版本更新记录",
     "接入 GitHub Releases 启动检查与工作区更新提示",
+    "修复下载完成后未覆盖旧 EXE、未自动重启的 Windows 更新器交接问题",
     "重构画布优先工作区、右侧检查器与固定任务栏",
     "禁用关闭状态下拉框与数值框的滚轮改值，避免滚动页面时误改参数",
     "扩充 OpenAI、Google、月之暗面、千问和硅基流动模型",
@@ -3248,27 +3250,36 @@ class CaptionApp:
 
     def _start_update_installer(self, script: Path, tag: str) -> None:
         try:
-            subprocess.Popen(
-                [
-                    "powershell.exe",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(script),
-                ],
-                creationflags=(
-                    subprocess.CREATE_NO_WINDOW
-                    | subprocess.DETACHED_PROCESS
-                ),
-                close_fds=True,
-            )
-        except OSError as error:
+            installer_process = launch_windows_update_installer(script)
+        except (OSError, ValueError) as error:
             self.update_download_running = False
             self.system_update_button.configure(state=tk.NORMAL, text="重新安装")
             messagebox.showerror("无法启动更新器", str(error), parent=self.root)
+            return
+        self.root.after(
+            250,
+            lambda: self._finish_update_handoff(
+                installer_process, script, tag
+            ),
+        )
+
+    def _finish_update_handoff(
+        self, installer_process: subprocess.Popen, script: Path, tag: str
+    ) -> None:
+        return_code = installer_process.poll()
+        if return_code is not None:
+            self.update_download_running = False
+            self.system_update_state_var.set("无法启动独立更新器")
+            self.system_update_button.configure(state=tk.NORMAL, text="重新安装")
+            log_path = script.parent / "update-install.log"
+            try:
+                detail = log_path.read_text(encoding="utf-8-sig").strip()
+            except OSError:
+                detail = ""
+            message = f"更新器启动后立即退出（代码 {return_code}）。"
+            if detail:
+                message += f"\n\n{detail[-1200:]}"
+            messagebox.showerror("无法启动更新器", message, parent=self.root)
             return
         self.update_install_pending = True
         self.log(f"更新 {tag} 已下载，正在退出并安装")

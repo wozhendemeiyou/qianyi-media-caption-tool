@@ -17,6 +17,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -36,7 +37,7 @@ from media_caption_worker import (
 
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.6"
+APP_VERSION = "3.6.1"
 GITHUB_REPOSITORY = "wozhendemeiyou/qianyi-media-caption-tool"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = (
@@ -951,6 +952,8 @@ def create_windows_update_script(
     installed_executable: Path,
     parent_pid: int,
     directory: Path | None = None,
+    *,
+    restart: bool = True,
 ) -> Path:
     """Create a one-shot PowerShell updater that runs after this process exits."""
     source = Path(update_executable).resolve()
@@ -966,20 +969,76 @@ def create_windows_update_script(
     script_dir = Path(directory or source.parent)
     script_dir.mkdir(parents=True, exist_ok=True)
     script = script_dir / "install-qianyi-update.ps1"
-    log_path = script_dir / "update-error.log"
+    log_path = script_dir / "update-install.log"
+    staged = target.with_name(f".{target.stem}-update-{int(parent_pid)}.exe")
+    expected_hash = hashlib.sha256(source.read_bytes()).hexdigest().upper()
+    target_parent = target.parent
+    restart_command = (
+        f"    Start-Process -FilePath $target -WorkingDirectory '{quoted(target_parent)}'\n"
+        if restart
+        else ""
+    )
     body = f"""$ErrorActionPreference = 'Stop'
+$source = '{quoted(source)}'
+$target = '{quoted(target)}'
+$staged = '{quoted(staged)}'
+$log = '{quoted(log_path)}'
+$expectedHash = '{expected_hash}'
+$succeeded = $false
+$exitCode = 0
 try {{
+    "[$(Get-Date -Format o)] Waiting for application process {int(parent_pid)}" | Set-Content -LiteralPath $log -Encoding UTF8
     Wait-Process -Id {int(parent_pid)} -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath '{quoted(source)}' -Destination '{quoted(target)}' -Force
-    Start-Process -FilePath '{quoted(target)}'
+    Copy-Item -LiteralPath $source -Destination $staged -Force
+    $stagedHash = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash
+    if ($stagedHash -ne $expectedHash) {{
+        throw "Staged executable SHA-256 mismatch"
+    }}
+    Move-Item -LiteralPath $staged -Destination $target -Force
+    $installedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    if ($installedHash -ne $expectedHash) {{
+        throw "Installed executable SHA-256 mismatch"
+    }}
+{restart_command.rstrip()}
+    "[$(Get-Date -Format o)] SUCCESS $installedHash" | Add-Content -LiteralPath $log -Encoding UTF8
+    $succeeded = $true
 }} catch {{
-    $_ | Out-String | Set-Content -LiteralPath '{quoted(log_path)}' -Encoding UTF8
+    $exitCode = 1
+    "[$(Get-Date -Format o)] FAILURE`n$($_ | Out-String)" | Add-Content -LiteralPath $log -Encoding UTF8
 }} finally {{
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+    if ($succeeded) {{
+        Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    }}
 }}
+exit $exitCode
 """
     script.write_text(body, encoding="utf-8-sig")
     return script
+
+
+def launch_windows_update_installer(script: Path) -> subprocess.Popen:
+    """Launch the updater hidden but attached long enough to execute reliably."""
+    updater = Path(script).resolve()
+    if not updater.is_file() or updater.suffix.casefold() != ".ps1":
+        raise ValueError("更新脚本路径无效")
+    return subprocess.Popen(
+        [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(updater),
+        ],
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
 
 
 def model_key_from_legacy(value: str) -> str:

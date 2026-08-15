@@ -226,6 +226,62 @@ class CoreTests(unittest.TestCase):
             script_text = script.read_text(encoding="utf-8-sig")
             self.assertIn("Wait-Process -Id 12345", script_text)
             self.assertIn("Copy-Item -LiteralPath", script_text)
+            self.assertIn("Get-FileHash -LiteralPath $staged", script_text)
+            self.assertIn("Start-Process -FilePath $target -WorkingDirectory", script_text)
+
+    @unittest.skipUnless(core.os.name == "nt", "Windows updater integration")
+    def test_windows_update_launcher_replaces_target_without_detached_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            system32 = Path(core.os.environ["WINDIR"]) / "System32"
+            source = root / "payload" / "source.exe"
+            installed = root / "installed" / "target.exe"
+            source.parent.mkdir()
+            installed.parent.mkdir()
+            source.write_bytes((system32 / "whoami.exe").read_bytes())
+            installed.write_bytes((system32 / "where.exe").read_bytes())
+            expected = core.hashlib.sha256(source.read_bytes()).hexdigest()
+            updater_dir = root / "updater"
+            helper = (
+                "from pathlib import Path; import os, sys; "
+                "from media_caption_core import "
+                "create_windows_update_script, launch_windows_update_installer; "
+                "script=create_windows_update_script("
+                "Path(sys.argv[1]), Path(sys.argv[2]), os.getpid(), "
+                "Path(sys.argv[3]), restart=False); "
+                "launch_windows_update_installer(script)"
+            )
+            completed = core.subprocess.run(
+                [
+                    core.sys.executable,
+                    "-c",
+                    helper,
+                    str(source),
+                    str(installed),
+                    str(updater_dir),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                timeout=8,
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if core.hashlib.sha256(installed.read_bytes()).hexdigest() == expected:
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(
+                expected, core.hashlib.sha256(installed.read_bytes()).hexdigest()
+            )
+            script = updater_dir / "install-qianyi-update.ps1"
+            self.assertFalse(script.exists())
+            self.assertIn(
+                "SUCCESS",
+                (updater_dir / "update-install.log").read_text(
+                    encoding="utf-8-sig"
+                ),
+            )
 
     def test_custom_endpoint_and_sampling_values_are_normalized(self):
         self.assertEqual(

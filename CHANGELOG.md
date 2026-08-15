@@ -2,6 +2,14 @@
 
 本文件记录芊熠智能打标工作台每个公开版本的主要变化。日期均使用北京时间。
 
+## [3.6.1] - 2026-08-15
+
+- 修复 Windows 自动更新器错误组合 `DETACHED_PROCESS` 与 PowerShell，导致下载完成后未执行覆盖和重启的问题。
+- 更新器改为可靠的隐藏子进程交接，并在退出主程序前检查更新器是否仍在运行。
+- 覆盖安装改为先复制到同目录暂存文件，校验 SHA-256 后再替换旧 EXE，并使用原安装目录重启。
+- 新增更新安装日志和真实 Windows 子进程回归测试；自动化测试增至 72 项。
+- v3.5 与初始 v3.6 因旧更新器自身包含此缺陷，需要手动运行一次 v3.6.1，后续版本即可恢复软件内自动更新。
+
 ## [3.6.0] - 2026-08-15
 
 - 平台设置新增自定义 OpenAI 兼容接口，可填写 Base URL、模型 ID 和可选 API Key。
@@ -77,6 +85,7 @@
 - API Key 使用 Windows DPAPI 加密，本地视觉语言模型可选单并发运行。
 - 44 项自动化测试与标准离线压力测试通过。
 
+[3.6.1]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.1
 [3.6.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6
 [3.5.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.5
 [3.4.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.4
