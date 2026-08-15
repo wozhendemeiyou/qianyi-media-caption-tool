@@ -172,6 +172,8 @@ class GuiTests(unittest.TestCase):
                 app.folder_var.set(str(root_path))
                 app.backend_var.set("local")
                 app.local_model_var.set(str(model_folder))
+                app.enable_mtp_var.set(True)
+                app.remove_thinking_tags_var.set(False)
                 app._backend_changed()
                 with mock.patch.object(gui, "BatchRunner", FakeRunner):
                     app.start_task([image_path], force=True)
@@ -184,6 +186,8 @@ class GuiTests(unittest.TestCase):
                 self.assertEqual(str(model_folder), captured["local_model_folder"])
                 self.assertEqual(1, captured["concurrency"])
                 self.assertEqual("", captured["api_key"])
+                self.assertTrue(captured["enable_mtp"])
+                self.assertFalse(captured["remove_thinking_tags"])
             finally:
                 root.update_idletasks()
                 app.close()
@@ -782,6 +786,7 @@ class GuiTests(unittest.TestCase):
                 app.top_p_var.set(0.75)
                 app.top_k_var.set(32)
                 app.seed_var.set("123")
+                app.remove_thinking_tags_var.set(True)
                 with mock.patch.object(gui, "BatchRunner", FakeRunner):
                     app.start_task()
                     deadline = time.monotonic() + 2
@@ -799,6 +804,7 @@ class GuiTests(unittest.TestCase):
                 self.assertEqual(0.55, captured["sampling"]["temperature"])
                 self.assertEqual(32, captured["sampling"]["top_k"])
                 self.assertEqual(123, captured["sampling"]["seed"])
+                self.assertTrue(captured["remove_thinking_tags"])
             finally:
                 root.update_idletasks()
                 app.close()
@@ -882,6 +888,15 @@ class GuiTests(unittest.TestCase):
                 self.assertIn("系统已内置", dialog.qianyi_route_note_var.get())
                 self.assertEqual("", dialog.qianyi_route_label.winfo_manager())
                 self.assertEqual("", dialog.qianyi_route_box.winfo_manager())
+                self.assertFalse(dialog.qianyi_mtp_switch.enabled)
+                self.assertTrue(dialog.qianyi_thinking_switch.enabled)
+                self.assertEqual(
+                    "启用 MTP", dialog.qianyi_mtp_switch.label.cget("text")
+                )
+                self.assertEqual(
+                    "移除思考标签",
+                    dialog.qianyi_thinking_switch.label.cget("text"),
+                )
                 self.assertFalse(any(
                     isinstance(widget, ttk.Checkbutton)
                     and "GitHub 版本更新" in str(widget.cget("text"))

@@ -638,7 +638,7 @@ class DpapiSecretStore(SecretStore):
 
 
 DEFAULT_SETTINGS = {
-    "version": 10,
+    "version": 11,
     "model_key": DEFAULT_MODEL_KEY,
     "provider_key": DEFAULT_PROVIDER_KEY,
     "api_models": {},
@@ -664,6 +664,8 @@ DEFAULT_SETTINGS = {
     "theme": "night",
     "auto_check_updates": True,
     "video_preflight": True,
+    "enable_mtp": False,
+    "remove_thinking_tags": True,
 }
 
 
@@ -1170,6 +1172,12 @@ class SettingsStore:
         )
         settings["video_preflight"] = bounded_bool(
             settings.get("video_preflight"), True
+        )
+        settings["enable_mtp"] = bounded_bool(
+            settings.get("enable_mtp"), False
+        )
+        settings["remove_thinking_tags"] = bounded_bool(
+            settings.get("remove_thinking_tags"), True
         )
         plaintext_key = source.get("api_key")
         if plaintext_key and not self.secret_store.get():
@@ -1787,7 +1795,13 @@ def _chat_text(payload: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
-        return "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict)).strip()
+        return "\n".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict)
+            and str(item.get("type", "text")).casefold()
+            not in {"reasoning", "analysis", "thinking"}
+        ).strip()
     return str(content).strip()
 
 
@@ -1803,6 +1817,51 @@ def _responses_text(payload: dict[str, Any]) -> str:
     if "choices" in payload:
         return _chat_text(payload)
     raise ApiError("接口响应缺少文本结果", body=json.dumps(payload, ensure_ascii=False)[:600])
+
+
+_THINKING_NAMES = r"think|thinking|analysis|reasoning"
+_THINKING_BLOCK_PATTERN = re.compile(
+    rf"<\s*({_THINKING_NAMES})\b[^>]*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINKING_CLOSE_PATTERN = re.compile(
+    rf"<\s*/\s*(?:{_THINKING_NAMES})\s*>",
+    re.IGNORECASE,
+)
+_THINKING_TAG_PATTERN = re.compile(
+    rf"<\s*/?\s*(?:{_THINKING_NAMES})\b[^>]*>",
+    re.IGNORECASE,
+)
+_THINKING_SQUARE_BLOCK_PATTERN = re.compile(
+    rf"\[\s*({_THINKING_NAMES})\s*].*?\[\s*/\s*\1\s*]",
+    re.IGNORECASE | re.DOTALL,
+)
+_THINKING_SQUARE_TAG_PATTERN = re.compile(
+    rf"\[\s*/?\s*(?:{_THINKING_NAMES})\s*]",
+    re.IGNORECASE,
+)
+
+
+def strip_thinking_sections(value: Any) -> str:
+    """Remove common reasoning blocks without touching the final caption."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for _index in range(4):
+        cleaned = _THINKING_BLOCK_PATTERN.sub("", text)
+        cleaned = _THINKING_SQUARE_BLOCK_PATTERN.sub("", cleaned)
+        if cleaned == text:
+            break
+        text = cleaned
+    # Some compatible endpoints omit the opening tag but retain </think>.
+    closing_tags = list(_THINKING_CLOSE_PATTERN.finditer(text))
+    if closing_tags and not _THINKING_TAG_PATTERN.match(text.lstrip()):
+        text = text[closing_tags[-1].end() :]
+    text = _THINKING_TAG_PATTERN.sub("", text)
+    text = _THINKING_SQUARE_TAG_PATTERN.sub("", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def custom_chat_url(value: str) -> str:
@@ -1825,6 +1884,7 @@ class CaptionClient:
         api_model: str = "",
         api_endpoint: str = "",
         sampling: dict[str, Any] | None = None,
+        remove_thinking_tags: bool = True,
     ):
         self.model = model
         self.api_key = api_key
@@ -1840,6 +1900,11 @@ class CaptionClient:
         )
         self.api_endpoint = api_endpoint.strip()
         self.sampling = normalize_sampling(sampling)
+        self.remove_thinking_tags = bool(remove_thinking_tags)
+
+    def _clean_text(self, value: Any) -> str:
+        text = str(value or "").strip()
+        return strip_thinking_sections(text) if self.remove_thinking_tags else text
 
     @property
     def headers(self) -> dict[str, str]:
@@ -1892,6 +1957,8 @@ class CaptionClient:
             payload[target_key] = value
         if self.provider.key == "openai" and self.api_model.startswith("gpt-5"):
             payload["reasoning_effort"] = "none"
+        if self.remove_thinking_tags and self.provider.key == "qwen":
+            payload["enable_thinking"] = False
         return payload
 
     def _responses_sampling_payload(self) -> dict[str, Any]:
@@ -1915,7 +1982,9 @@ class CaptionClient:
             }],
         }
         payload.update(self._sampling_payload())
-        text = _chat_text(self._billable_post(self._chat_url(), payload))
+        text = self._clean_text(
+            _chat_text(self._billable_post(self._chat_url(), payload))
+        )
         if not text:
             raise ApiError("模型返回了空结果")
         return text
@@ -1947,7 +2016,11 @@ class CaptionClient:
             }],
         }
         payload.update(self._sampling_payload())
-        text = _chat_text(self._billable_post(self._chat_url(), payload, timeout=(10, 240)))
+        text = self._clean_text(
+            _chat_text(
+                self._billable_post(self._chat_url(), payload, timeout=(10, 240))
+            )
+        )
         if not text:
             raise ApiError("模型返回了空结果")
         return text
@@ -1967,7 +2040,13 @@ class CaptionClient:
                 }],
             }
             payload.update(self._responses_sampling_payload())
-            return _responses_text(self._billable_post(RESPONSES_URL, payload, timeout=(10, 240)))
+            text = _responses_text(
+                self._billable_post(RESPONSES_URL, payload, timeout=(10, 240))
+            )
+            text = self._clean_text(text)
+            if not text:
+                raise ApiError("模型返回了空结果")
+            return text
         finally:
             self._delete_file(file_id)
 
@@ -2019,7 +2098,14 @@ class CaptionClient:
 class LocalCaptionClient:
     """Optional Hugging Face vision-language backend loaded from a local folder."""
 
-    def __init__(self, model_folder: Path, token: CancellationToken):
+    def __init__(
+        self,
+        model_folder: Path,
+        token: CancellationToken,
+        *,
+        enable_mtp: bool = False,
+        remove_thinking_tags: bool = True,
+    ):
         self.model_folder = Path(model_folder)
         self.token = token
         self.processor = None
@@ -2027,11 +2113,36 @@ class LocalCaptionClient:
         self.torch = None
         self.device = "cpu"
         self.sampling = normalize_sampling(None)
+        self.enable_mtp = bool(enable_mtp)
+        self.mtp_active = False
+        self.remove_thinking_tags = bool(remove_thinking_tags)
         self._load_error: RuntimeError | None = None
         if not self.model_folder.is_dir():
             raise ValueError("本地模型目录不存在")
         if not (self.model_folder / "config.json").is_file():
             raise ValueError("本地模型目录缺少 config.json，不是 Hugging Face 模型目录")
+
+    def _supports_native_mtp(self) -> bool:
+        config = getattr(self.model, "config", None)
+        generation_config = getattr(self.model, "generation_config", None)
+        mtp_layers = 0
+        for key in (
+            "num_nextn_predict_layers",
+            "num_mtp_layers",
+            "mtp_num_hidden_layers",
+        ):
+            try:
+                mtp_layers = max(
+                    mtp_layers,
+                    int(getattr(config, key, 0) or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+        return bool(
+            mtp_layers > 0
+            and generation_config is not None
+            and hasattr(generation_config, "use_mtp")
+        )
 
     def _ensure_loaded(self) -> None:
         if self.model is not None and self.processor is not None:
@@ -2074,6 +2185,9 @@ class LocalCaptionClient:
             self.model.to(self.device)
             self.model.eval()
             self.torch = torch
+            self.mtp_active = bool(
+                self.enable_mtp and self._supports_native_mtp()
+            )
         except Exception as error:
             self.processor = None
             self.model = None
@@ -2121,6 +2235,8 @@ class LocalCaptionClient:
             "max_new_tokens": self.sampling["max_tokens"],
             "do_sample": self.sampling["temperature"] > 0,
         }
+        if self.mtp_active:
+            generation["use_mtp"] = True
         if generation["do_sample"]:
             generation.update({
                 "temperature": max(0.01, self.sampling["temperature"]),
@@ -2131,10 +2247,22 @@ class LocalCaptionClient:
         if self.sampling["seed"] is not None:
             self.torch.manual_seed(self.sampling["seed"])
         with self.torch.inference_mode():
-            generated = self.model.generate(
-                **inputs,
-                **generation,
-            )
+            try:
+                generated = self.model.generate(
+                    **inputs,
+                    **generation,
+                )
+            except (TypeError, ValueError, NotImplementedError):
+                if not self.mtp_active:
+                    raise
+                # Model/config combinations can advertise MTP before their
+                # custom generation implementation supports the flag.
+                self.mtp_active = False
+                generation.pop("use_mtp", None)
+                generated = self.model.generate(
+                    **inputs,
+                    **generation,
+                )
         self.token.check()
         input_ids = inputs.get("input_ids")
         if input_ids is not None and generated.shape[-1] > input_ids.shape[-1]:
@@ -2144,6 +2272,8 @@ class LocalCaptionClient:
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0].strip()
+        if self.remove_thinking_tags:
+            text = strip_thinking_sections(text)
         if not text:
             raise RuntimeError("本地模型返回了空结果")
         return text
@@ -2420,6 +2550,8 @@ class BatchRunner:
         sampling: dict[str, Any] | None = None,
         only_paths: Iterable[Path] | None = None,
         video_preflight: bool = True,
+        enable_mtp: bool = False,
+        remove_thinking_tags: bool = True,
     ) -> BatchSummary:
         self._running.set()
         model = MODELS.get(model_key, MODELS[DEFAULT_MODEL_KEY])
@@ -2427,6 +2559,8 @@ class BatchRunner:
             provider_key, API_PROVIDERS[DEFAULT_PROVIDER_KEY]
         )
         sampling = normalize_sampling(sampling)
+        enable_mtp = bool(enable_mtp)
+        remove_thinking_tags = bool(remove_thinking_tags)
         concurrency = max(1, min(MAX_CONCURRENCY, int(concurrency)))
         if backend == "local":
             concurrency = 1
@@ -2447,6 +2581,8 @@ class BatchRunner:
             "concurrency": concurrency,
             "sampling": sampling,
             "video_preflight": bool(video_preflight),
+            "enable_mtp": enable_mtp,
+            "remove_thinking_tags": remove_thinking_tags,
         })
         summary = BatchSummary()
         started = time.monotonic()
@@ -2518,6 +2654,8 @@ class BatchRunner:
             if backend == "local":
                 client = LocalCaptionClient(Path(local_model_folder), self.token)
                 client.sampling = sampling
+                client.enable_mtp = enable_mtp
+                client.remove_thinking_tags = remove_thinking_tags
             else:
                 client = CaptionClient(
                     model,
@@ -2528,6 +2666,7 @@ class BatchRunner:
                     api_model=api_model,
                     api_endpoint=api_endpoint,
                     sampling=sampling,
+                    remove_thinking_tags=remove_thinking_tags,
                 )
             effective_prompt = compose_prompt(
                 prompt,

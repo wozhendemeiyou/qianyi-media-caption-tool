@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-75%20passed-35B46F)](./tests)
+[![Tests](https://img.shields.io/badge/Tests-78%20passed-35B46F)](./tests)
 [![Version](https://img.shields.io/badge/Release-v3.6.3-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
@@ -54,6 +54,7 @@
 | 固定任务栏 | 开始、停止、重试、处理选中、批处理、导出、进度和统计始终固定在窗口底部。 |
 | 系统说明与更新 | 内置功能说明、当前版本和更新日志；发现新版本后可在软件内下载、校验、覆盖并自动重启。 |
 | 多 API 平台 | 内置火山引擎、OpenAI、Google、月之暗面、千问和 SiliconFlow，并支持用户填写 OpenAI 兼容 Base URL、模型 ID 与 API Key。 |
+| 推理输出控制 | 平台设置提供 MTP 加速与思考标签清理滑块；兼容本地模型可启用原生 MTP，所有后端均可清理最终标注中的思考区块。 |
 | 常驻硬件状态 | 底部持续显示 CPU、内存和 NVIDIA GPU 利用率/显存；采集在后台线程中完成，不阻塞界面。 |
 | 可恢复的批处理 | 跳过已有有效 TXT，失败项独立记录并可重试；停止任务后再次运行不会浪费已经完成的结果。 |
 | 按需媒体引擎 | 视频任务才启动独立 Worker；随机本地端口、一次性令牌和项目目录白名单共同限制访问范围。 |
@@ -180,6 +181,9 @@ python -m venv .venv312
 ## 本地模型
 
 “外部 API / 本地模型”可在任务开始前切换。本地后端加载用户指定目录中的 Hugging Face 视觉语言模型，目录必须包含 `config.json`。本地后端目前支持图片，固定单并发；视频仍使用外部 API。
+
+- “启用 MTP”仅对包含原生 MTP 预测层、且当前 Transformers 版本支持 `use_mtp` 的本地模型生效；不兼容时自动使用普通生成。云 API 的 MTP 由服务商推理端决定。
+- “移除思考标签”默认开启：兼容平台会尽量关闭思考输出，客户端还会清除 `<think>`、`<thinking>`、`<analysis>` 与 `<reasoning>` 区块，避免训练 TXT 混入推理过程。
 
 根据显卡环境安装 PyTorch 后，再安装本地模型依赖：
 

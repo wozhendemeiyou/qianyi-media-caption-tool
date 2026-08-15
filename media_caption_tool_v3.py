@@ -63,6 +63,8 @@ MONO_FONT = "Consolas"
 RELEASE_NOTES = (
     "为 Windows EXE 补充公司名、产品名、版本号与版权信息",
     "修复旧版立即更新后继承失效 _MEI 目录导致 Python DLL 加载失败",
+    "平台设置标题新增 MTP 加速与思考标签清理滑块",
+    "兼容本地模型可启用原生 MTP，模型输出可自动移除思考区块",
     "二次打标完成后立即覆盖刷新当前标注结果与 TXT",
     "结果区新增生成中、已更新、失败保留和单项耗时反馈",
     "采用现代包豪斯日光模式与灰绿色夜光模式",
@@ -375,6 +377,104 @@ class ToolTip:
             except tk.TclError:
                 pass
             self.window = None
+
+
+class SlideSwitch(ttk.Frame):
+    """Compact theme-aware on/off control for dense settings headings."""
+
+    def __init__(
+        self,
+        parent,
+        text: str,
+        variable: tk.BooleanVar,
+        *,
+        command=None,
+    ):
+        super().__init__(parent)
+        self.variable = variable
+        self.command = command
+        self.enabled = True
+        self.label = ttk.Label(self, text=text, style="Muted.TLabel")
+        self.label.pack(side=tk.LEFT, padx=(0, 7))
+        self.canvas = tk.Canvas(
+            self,
+            width=38,
+            height=22,
+            highlightthickness=0,
+            borderwidth=0,
+            background=COLORS["bg"],
+            cursor="hand2",
+        )
+        self.canvas.pack(side=tk.LEFT)
+        self._trace_id = self.variable.trace_add("write", self._variable_changed)
+        for widget in (self, self.label, self.canvas):
+            widget.bind("<Button-1>", self._toggle, add="+")
+        self.bind("<Destroy>", self._destroyed, add="+")
+        self.redraw()
+
+    def _variable_changed(self, *_args) -> None:
+        self.redraw()
+
+    def _toggle(self, _event=None):
+        if not self.enabled:
+            return "break"
+        self.variable.set(not bool(self.variable.get()))
+        if self.command is not None:
+            self.command()
+        return "break"
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+        self.canvas.configure(cursor="hand2" if self.enabled else "arrow")
+        self.label.configure(
+            style="TLabel" if self.enabled else "Muted.TLabel"
+        )
+        self.redraw()
+
+    def redraw(self) -> None:
+        try:
+            if not self.canvas.winfo_exists():
+                return
+            self.canvas.configure(background=COLORS["bg"])
+            self.canvas.delete("all")
+            selected = bool(self.variable.get())
+            track = (
+                COLORS["accent"]
+                if selected and self.enabled
+                else (
+                    COLORS["input_disabled"]
+                    if not self.enabled
+                    else COLORS["input_border"]
+                )
+            )
+            knob = (
+                COLORS["primary_fg"]
+                if self.enabled
+                else COLORS["disabled_fg"]
+            )
+            self.canvas.create_oval(1, 2, 19, 20, fill=track, outline="")
+            self.canvas.create_rectangle(10, 2, 28, 20, fill=track, outline="")
+            self.canvas.create_oval(19, 2, 37, 20, fill=track, outline="")
+            center_x = 28 if selected else 10
+            self.canvas.create_oval(
+                center_x - 7,
+                4,
+                center_x + 7,
+                18,
+                fill=knob,
+                outline="",
+            )
+        except tk.TclError:
+            pass
+
+    def _destroyed(self, event) -> None:
+        if event.widget is not self or not self._trace_id:
+            return
+        try:
+            self.variable.trace_remove("write", self._trace_id)
+        except tk.TclError:
+            pass
+        self._trace_id = ""
 
 
 class _FileTime(ctypes.Structure):
@@ -1662,6 +1762,7 @@ class CaptionApp:
         self.semantic_icon_labels.append((icon, tone))
         copy = ttk.Frame(row)
         copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        row.copy_frame = copy
         ttk.Label(copy, text=title, style="SectionTitle.TLabel").pack(anchor=tk.W)
         if subtitle:
             subtitle_label = ttk.Label(copy, text=subtitle, style="Muted.TLabel")
@@ -2109,6 +2210,8 @@ class CaptionApp:
         self.focus_label_var = tk.StringVar(value="训练主体")
         self.trigger_word_var = tk.StringVar()
         self.local_model_var = tk.StringVar()
+        self.enable_mtp_var = tk.BooleanVar(value=False)
+        self.remove_thinking_tags_var = tk.BooleanVar(value=True)
 
         task_scroll_host = ttk.Frame(self.task_settings_tab)
         task_scroll_host.pack(fill=tk.BOTH, expand=True)
@@ -3825,6 +3928,10 @@ class CaptionApp:
         self.focus_label_var.set(FOCUS_LABELS.get(focus, "训练主体"))
         self.output_language_var.set(self.settings.get("output_language", "zh"))
         self.trigger_word_var.set(self.settings.get("trigger_word", ""))
+        self.enable_mtp_var.set(bool(self.settings.get("enable_mtp", False)))
+        self.remove_thinking_tags_var.set(
+            bool(self.settings.get("remove_thinking_tags", True))
+        )
         model = MODELS.get(self.settings.get("model_key"), MODELS[DEFAULT_MODEL_KEY])
         self.model_label_var.set(model.label)
         provider_key = self.settings.get("provider_key", DEFAULT_PROVIDER_KEY)
@@ -4395,6 +4502,42 @@ class CaptionApp:
         api_heading = self._semantic_heading(
             frame, "⌁", "API 平台与模型", "violet", "PROVIDER CONNECTION"
         )
+        enable_mtp_var = tk.BooleanVar(value=bool(self.enable_mtp_var.get()))
+        remove_thinking_tags_var = tk.BooleanVar(
+            value=bool(self.remove_thinking_tags_var.get())
+        )
+        inference_switches = ttk.Frame(api_heading)
+        inference_switches.pack(
+            side=tk.RIGHT,
+            padx=(18, 0),
+            before=api_heading.copy_frame,
+        )
+        mtp_switch = SlideSwitch(
+            inference_switches,
+            "启用 MTP",
+            enable_mtp_var,
+        )
+        mtp_switch.pack(side=tk.LEFT)
+        thinking_switch = SlideSwitch(
+            inference_switches,
+            "移除思考标签",
+            remove_thinking_tags_var,
+        )
+        thinking_switch.pack(side=tk.LEFT, padx=(18, 0))
+        for widget in (mtp_switch, mtp_switch.label, mtp_switch.canvas):
+            ToolTip(
+                widget,
+                "仅本地兼容模型生效；云 API 的 MTP 由服务商推理端管理。",
+            )
+        for widget in (
+            thinking_switch,
+            thinking_switch.label,
+            thinking_switch.canvas,
+        ):
+            ToolTip(
+                widget,
+                "关闭兼容模型的思考输出，并清理最终标注中的思考区块。",
+            )
         api_heading.grid(
             row=6, column=0, columnspan=3, sticky=tk.EW, pady=(12, 10)
         )
@@ -4524,6 +4667,8 @@ class CaptionApp:
         dialog.qianyi_local_model_entry = local_model_entry
         dialog.qianyi_local_concurrency_note = local_concurrency_note
         dialog.qianyi_api_key_entry = entry
+        dialog.qianyi_mtp_switch = mtp_switch
+        dialog.qianyi_thinking_switch = thinking_switch
 
         selected_models = dict(self.api_model_by_provider)
         selected_models[DEFAULT_PROVIDER_KEY] = MODELS[
@@ -4782,6 +4927,8 @@ class CaptionApp:
             )
             entry.configure(state=api_state)
             connection_test_button.configure(state=api_state)
+            mtp_switch.set_enabled(is_local)
+            thinking_switch.set_enabled(True)
             portal_button.configure(
                 state=(
                     tk.NORMAL
@@ -4859,12 +5006,20 @@ class CaptionApp:
             self.output_language_var.set(language_var.get())
             self.backend_var.set(backend_var.get())
             self.local_model_var.set(local_model_var.get().strip())
+            self.enable_mtp_var.set(bool(enable_mtp_var.get()))
+            self.remove_thinking_tags_var.set(
+                bool(remove_thinking_tags_var.get())
+            )
             self._backend_changed()
             self.settings.update({
                 "caption_style": self.caption_style_var.get(),
                 "output_language": self.output_language_var.get(),
                 "backend": self.backend_var.get(),
                 "local_model_folder": self.local_model_var.get(),
+                "enable_mtp": bool(self.enable_mtp_var.get()),
+                "remove_thinking_tags": bool(
+                    self.remove_thinking_tags_var.get()
+                ),
             })
             self.settings_store.save(self.settings)
             close_dialog()
@@ -4929,6 +5084,10 @@ class CaptionApp:
             "api_endpoints": dict(self.api_endpoint_by_provider),
             "custom_api_endpoint": self.api_endpoint_by_provider.get("custom", ""),
             "sampling": self._sampling_values(),
+            "enable_mtp": bool(self.enable_mtp_var.get()),
+            "remove_thinking_tags": bool(
+                self.remove_thinking_tags_var.get()
+            ),
             "selected_preset": self.preset_var.get(),
             "theme": self.theme_key,
         })
@@ -5061,6 +5220,8 @@ class CaptionApp:
         labeling_focus = FOCUS_OPTIONS.get(self.focus_label_var.get(), "subject")
         output_language = self.output_language_var.get()
         trigger_word = self.trigger_word_var.get().strip()
+        enable_mtp = bool(self.enable_mtp_var.get())
+        remove_thinking_tags = bool(self.remove_thinking_tags_var.get())
         skip_existing = bool(self.skip_var.get()) and not force
         self._save_workspace_settings()
         self.runner = BatchRunner(self._post_event)
@@ -5073,7 +5234,10 @@ class CaptionApp:
         self._set_stage(2)
         self.progress_text_var.set("准备任务...")
         if backend == "local":
-            self.log(f"开始任务：本地模型 {Path(local_model_folder).name} / 单并发")
+            self.log(
+                f"开始任务：本地模型 {Path(local_model_folder).name} / 单并发 / "
+                f"MTP {'请求启用' if enable_mtp else '关闭'}"
+            )
         else:
             self.log(
                 f"开始任务：{provider.label} / {api_model} / "
@@ -5086,7 +5250,8 @@ class CaptionApp:
         self.log(
             f"打标策略：{self.focus_label_var.get()} / "
             f"{'中文' if output_language == 'zh' else 'English'}"
-            f"{(' / 触发词 ' + trigger_word) if trigger_word else ''}"
+            f"{(' / 触发词 ' + trigger_word) if trigger_word else ''} / "
+            f"思考标签{'移除' if remove_thinking_tags else '保留'}"
         )
 
         def run() -> None:
@@ -5112,6 +5277,8 @@ class CaptionApp:
                 sampling=sampling,
                 only_paths=only_paths,
                 video_preflight=bool(self.settings.get("video_preflight", True)),
+                enable_mtp=enable_mtp,
+                remove_thinking_tags=remove_thinking_tags,
             )
 
         self.controller_thread = threading.Thread(target=run, daemon=True, name="batch-controller")

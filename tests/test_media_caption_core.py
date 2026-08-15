@@ -46,6 +46,95 @@ class CoreTests(unittest.TestCase):
         self.assertEqual("", core.DEFAULT_SETTINGS["user_prompt"])
         self.assertEqual("", core.DEFAULT_SETTINGS["selected_preset"])
         self.assertEqual({}, core.DEFAULT_SETTINGS["prompt_presets"])
+        self.assertFalse(core.DEFAULT_SETTINGS["enable_mtp"])
+        self.assertTrue(core.DEFAULT_SETTINGS["remove_thinking_tags"])
+
+    def test_thinking_sections_are_removed_without_touching_final_caption(self):
+        self.assertEqual(
+            "最终标注",
+            core.strip_thinking_sections(
+                "<think>先分析主体和背景</think>\n最终标注"
+            ),
+        )
+        self.assertEqual(
+            "final caption",
+            core.strip_thinking_sections(
+                "hidden reasoning</analysis>\nfinal caption"
+            ),
+        )
+        self.assertEqual(
+            "保留正文",
+            core.strip_thinking_sections(
+                "[reasoning]内部推理[/reasoning]\n保留正文"
+            ),
+        )
+        self.assertEqual(
+            "final caption",
+            core._chat_text({
+                "choices": [{
+                    "message": {
+                        "content": [
+                            {"type": "reasoning", "text": "hidden"},
+                            {"type": "text", "text": "final caption"},
+                        ]
+                    }
+                }]
+            }),
+        )
+
+    def test_qwen_can_disable_thinking_and_clean_returned_tags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+            calls = []
+
+            def sender(method, url, **kwargs):
+                calls.append(kwargs["json"])
+                return FakeResponse(payload={
+                    "choices": [{
+                        "message": {
+                            "content": "<think>分析画面</think>\n干净标注"
+                        }
+                    }]
+                })
+
+            client = core.CaptionClient(
+                core.MODELS[core.DEFAULT_MODEL_KEY],
+                "qwen-key",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+                provider_key="qwen",
+                api_model="qwen3.8-max",
+                remove_thinking_tags=True,
+            )
+
+            self.assertEqual("干净标注", client.caption_image(image_path, "prompt"))
+            self.assertIs(False, calls[0]["enable_thinking"])
+
+    def test_local_mtp_requires_model_layers_and_generation_support(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config.json").write_text("{}", encoding="utf-8")
+            client = core.LocalCaptionClient(
+                root,
+                core.CancellationToken(),
+                enable_mtp=True,
+            )
+
+            class ModelConfig:
+                num_nextn_predict_layers = 1
+
+            class GenerationConfig:
+                use_mtp = False
+
+            class Model:
+                config = ModelConfig()
+                generation_config = GenerationConfig()
+
+            client.model = Model()
+            self.assertTrue(client._supports_native_mtp())
+            client.model.generation_config = object()
+            self.assertFalse(client._supports_native_mtp())
 
     def test_windows_version_resource_matches_app_version(self):
         project_root = Path(core.__file__).resolve().parent

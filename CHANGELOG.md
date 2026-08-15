@@ -9,6 +9,8 @@
 - 增加构建配置一致性测试，避免应用版本、PyInstaller 文件名与 Windows 版本资源发生漂移。
 - 修复从旧版立即更新后，新版继承旧 PyInstaller `_MEI` 临时目录并报 `Failed to load Python DLL` 的问题。
 - 更新器现在会重置 PyInstaller 子进程环境，并等待旧版主进程与单文件 Bootloader 完整退出后再覆盖重启。
+- “API 平台与模型”标题右侧新增“启用 MTP”和“移除思考标签”圆角滑块；MTP 仅在本地模型具备预测层且 Transformers 支持时启用，不兼容时安全回退。
+- 开启思考标签清理后，千问请求会关闭兼容模型的思考输出，并统一移除 `<think>`、`<analysis>`、`<reasoning>` 等思考区块，防止写入最终 TXT。
 
 ## [3.6.2] - 2026-08-15
 
