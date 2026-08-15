@@ -5367,6 +5367,7 @@ class CaptionApp:
             "caption_usable": has_usable_caption(path),
         }
         self.counts[status] += 1
+        self._refresh_selected_result(path, status, detail)
         if old_visible is not None and old_visible != self._visible(self.items[key]):
             self.refresh_table()
             self._update_stats()
@@ -5377,6 +5378,34 @@ class CaptionApp:
             self.tree.item(row, values=(STATUS_TEXT[status], relative, detail.replace("\n", " ")[:220]), tags=(status,))
         self.gallery.update_item(self.items[key])
         self._update_stats()
+
+    def _refresh_selected_result(
+        self, path: Path, status: str, detail: str
+    ) -> None:
+        """Keep the inspector synchronized when a selected item is relabeled."""
+        if status != "success" or self.selected_paths != {str(path)}:
+            return
+        caption = detail.strip()
+        caption_path = caption_path_for(path)
+        if caption_path.is_file():
+            try:
+                caption = caption_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                pass
+        self.result_text.delete("1.0", tk.END)
+        self.result_text.insert("1.0", caption)
+        self.save_result_button.configure(
+            state=tk.NORMAL if caption else tk.DISABLED
+        )
+        try:
+            size_mb = path.stat().st_size / 1024 / 1024
+            self.selected_item_var.set(
+                f"{path.name}  ·  {size_mb:.2f} MB  ·  {STATUS_TEXT[status]}"
+            )
+        except OSError:
+            self.selected_item_var.set(
+                f"{path.name}  ·  {STATUS_TEXT[status]}"
+            )
 
     def _set_orphan_item(self, path: Path) -> None:
         self.items[str(path)] = {
@@ -5602,7 +5631,17 @@ class CaptionApp:
                 status = payload["status"]
                 detail = payload.get("detail", "")
                 self._set_item(path, status, detail)
-                self.log(f"{STATUS_TEXT[status]}：{self._relative_path(path)}{(' | ' + detail[:300]) if detail else ''}")
+                elapsed = payload.get("elapsed_seconds")
+                elapsed_text = (
+                    f" · {float(elapsed):.1f} 秒"
+                    if elapsed is not None and status != "running"
+                    else ""
+                )
+                self.log(
+                    f"{STATUS_TEXT[status]}：{self._relative_path(path)}"
+                    f"{elapsed_text}"
+                    f"{(' | ' + detail[:300]) if detail else ''}"
+                )
             elif kind == "progress":
                 completed = payload["completed"]
                 total = payload["total"]
@@ -5925,6 +5964,7 @@ class CaptionApp:
             self.sash_after_id,
             self.splash_after_id,
             self.update_after_id,
+            self._preview_resize_after,
         ):
             if after_id is not None:
                 try:
@@ -5940,6 +5980,7 @@ class CaptionApp:
         self.events_after_id = None
         self.sash_after_id = None
         self.splash_after_id = None
+        self._preview_resize_after = None
         self.root.destroy()
 
 

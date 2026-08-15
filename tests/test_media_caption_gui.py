@@ -188,6 +188,46 @@ class GuiTests(unittest.TestCase):
                 root.update_idletasks()
                 app.close()
 
+    def test_relabel_overwrites_txt_and_refreshes_selected_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            image_path = root_path / "relabel.jpg"
+            Image.new("RGB", (32, 32), "white").save(image_path)
+            core.write_caption(image_path, "old caption")
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(
+                root, self._store(root_path), show_splash=False
+            )
+            try:
+                app.folder_var.set(str(root_path))
+                app._handle_scan(core.scan_media(root_path, "image"))
+                app.selected_paths = {str(image_path)}
+                app._display_selection()
+                self.assertEqual(
+                    "old caption",
+                    app.result_text.get("1.0", tk.END).strip(),
+                )
+
+                core.write_caption(image_path, "new caption")
+                app._set_item(image_path, "success", "new caption")
+
+                self.assertEqual(
+                    "new caption",
+                    core.caption_path_for(image_path).read_text(encoding="utf-8"),
+                )
+                self.assertEqual(
+                    "new caption",
+                    app.result_text.get("1.0", tk.END).strip(),
+                )
+                self.assertNotIn("old caption", app.result_text.get("1.0", tk.END))
+                self.assertIn(
+                    gui.STATUS_TEXT["success"], app.selected_item_var.get()
+                )
+            finally:
+                root.update_idletasks()
+                app.close()
+
     def test_missing_txt_filter_batch_and_trigger_word_update(self):
         with tempfile.TemporaryDirectory() as directory:
             root_path = Path(directory)

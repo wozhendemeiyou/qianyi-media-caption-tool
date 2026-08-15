@@ -602,6 +602,11 @@ class CoreTests(unittest.TestCase):
             path.write_bytes(b"media")
             core.write_caption(path, " valid caption ")
             self.assertEqual("valid caption", core.caption_path_for(path).read_text(encoding="utf-8"))
+            core.write_caption(path, "replacement caption")
+            self.assertEqual(
+                "replacement caption",
+                core.caption_path_for(path).read_text(encoding="utf-8"),
+            )
             self.assertFalse(list(Path(directory).glob("*.tmp")))
             with self.assertRaises(ValueError):
                 core.write_caption(path, "   ")
@@ -837,11 +842,21 @@ class CoreTests(unittest.TestCase):
                 return FakeResponse(payload={"choices": [{"message": {"content": "new caption"}}]})
 
             data_root = root / "appdata"
+            events = []
             with mock.patch.object(core, "app_data_dir", return_value=data_root):
-                runner = core.BatchRunner(lambda kind, payload: None, core.HttpTransport(sender))
+                runner = core.BatchRunner(
+                    lambda kind, payload: events.append((kind, payload)),
+                    core.HttpTransport(sender),
+                )
                 summary = runner.run(root, "image", "prompt", "seed-2.1-pro", "key")
             self.assertEqual(1, summary.success)
             self.assertEqual("new caption", core.caption_path_for(image_path).read_text(encoding="utf-8"))
+            success_event = next(
+                payload
+                for kind, payload in events
+                if kind == "status" and payload["status"] == "success"
+            )
+            self.assertGreaterEqual(success_event["elapsed_seconds"], 0)
             states = list(data_root.glob("projects/*/state.json"))
             self.assertEqual(1, len(states))
             state = json.loads(states[0].read_text(encoding="utf-8"))

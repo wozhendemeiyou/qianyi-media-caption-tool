@@ -2525,6 +2525,7 @@ class BatchRunner:
                         path = pending.get_nowait()
                     except queue.Empty:
                         return
+                    item_started = time.monotonic()
                     self._emit("status", path=path, status="running", detail="正在请求模型")
                     journal.record(path, "running", "正在请求模型")
                     try:
@@ -2554,19 +2555,37 @@ class BatchRunner:
                         with lock:
                             summary.cancelled += 1
                         journal.record(path, "cancelled", "任务已取消")
-                        self._emit("status", path=path, status="cancelled", detail="任务已取消")
+                        self._emit(
+                            "status",
+                            path=path,
+                            status="cancelled",
+                            detail="任务已取消",
+                            elapsed_seconds=time.monotonic() - item_started,
+                        )
                     except Exception as error:
                         detail = str(error)
                         with lock:
                             summary.failed += 1
                             summary.failures.append((path, detail))
                         journal.record(path, "failed", detail)
-                        self._emit("status", path=path, status="failed", detail=detail)
+                        self._emit(
+                            "status",
+                            path=path,
+                            status="failed",
+                            detail=detail,
+                            elapsed_seconds=time.monotonic() - item_started,
+                        )
                     else:
                         with lock:
                             summary.success += 1
                         journal.record(path, "success", caption[:240])
-                        self._emit("status", path=path, status="success", detail=caption)
+                        self._emit(
+                            "status",
+                            path=path,
+                            status="success",
+                            detail=caption,
+                            elapsed_seconds=time.monotonic() - item_started,
+                        )
                     finally:
                         pending.task_done()
                         with lock:
