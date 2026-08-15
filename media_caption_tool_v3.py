@@ -61,6 +61,8 @@ UI_FONT = "HarmonyOS Sans SC"
 LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
 RELEASE_NOTES = (
+    "二次打标完成后立即覆盖刷新当前标注结果与 TXT",
+    "结果区新增生成中、已更新、失败保留和单项耗时反馈",
     "采用现代包豪斯日光模式与灰绿色夜光模式",
     "统一 HarmonyOS Sans SC 字体层级并减少冗余粗体",
     "新增语义标题图标、系统说明与版本更新记录",
@@ -730,6 +732,7 @@ class CaptionApp:
         self.sash_after_id = None
         self.splash_after_id = None
         self.update_after_id = None
+        self._result_feedback_after_id = None
         self.update_check_running = False
         self.update_download_running = False
         self.update_install_pending = False
@@ -1981,6 +1984,14 @@ class CaptionApp:
         inspector_tabs.add(self.log_tab, text="运行日志")
         self.inspector_tabs = inspector_tabs
         self.preview_tab.bind("<Configure>", self._layout_preview_panel)
+        self.result_state_var = tk.StringVar(value="● 等待标注结果")
+        self.result_state_label = ttk.Label(
+            self.result_tab,
+            textvariable=self.result_state_var,
+            style="SurfaceMuted.TLabel",
+            anchor=tk.W,
+        )
+        self.result_state_label.pack(fill=tk.X, pady=(0, 6))
         self.result_text = scrolledtext.ScrolledText(
             self.result_tab, width=34, wrap=tk.WORD,
             font=(UI_FONT, 9),
@@ -5349,7 +5360,13 @@ class CaptionApp:
         if len(result.orphan_captions) > 10:
             self.log(f"另有 {len(result.orphan_captions) - 10} 个孤立 TXT")
 
-    def _set_item(self, path: Path, status: str, detail: str) -> None:
+    def _set_item(
+        self,
+        path: Path,
+        status: str,
+        detail: str,
+        elapsed_seconds: float | None = None,
+    ) -> None:
         key = str(path)
         old = self.items.get(key)
         old_visible = self._visible(old) if old is not None else None
@@ -5367,7 +5384,9 @@ class CaptionApp:
             "caption_usable": has_usable_caption(path),
         }
         self.counts[status] += 1
-        self._refresh_selected_result(path, status, detail)
+        self._refresh_selected_result(
+            path, status, detail, elapsed_seconds=elapsed_seconds
+        )
         if old_visible is not None and old_visible != self._visible(self.items[key]):
             self.refresh_table()
             self._update_stats()
@@ -5380,10 +5399,26 @@ class CaptionApp:
         self._update_stats()
 
     def _refresh_selected_result(
-        self, path: Path, status: str, detail: str
+        self,
+        path: Path,
+        status: str,
+        detail: str,
+        elapsed_seconds: float | None = None,
     ) -> None:
         """Keep the inspector synchronized when a selected item is relabeled."""
-        if status != "success" or self.selected_paths != {str(path)}:
+        if self.selected_paths != {str(path)}:
+            return
+        self._update_selected_item_header(path, status)
+        if status == "running":
+            self._set_result_feedback("running")
+            return
+        if status == "failed":
+            self._set_result_feedback("failed", elapsed_seconds)
+            return
+        if status == "cancelled":
+            self._set_result_feedback("cancelled", elapsed_seconds)
+            return
+        if status != "success":
             return
         caption = detail.strip()
         caption_path = caption_path_for(path)
@@ -5394,9 +5429,14 @@ class CaptionApp:
                 pass
         self.result_text.delete("1.0", tk.END)
         self.result_text.insert("1.0", caption)
+        self.result_text.mark_set(tk.INSERT, "1.0")
+        self.result_text.see("1.0")
         self.save_result_button.configure(
             state=tk.NORMAL if caption else tk.DISABLED
         )
+        self._set_result_feedback("success", elapsed_seconds)
+
+    def _update_selected_item_header(self, path: Path, status: str) -> None:
         try:
             size_mb = path.stat().st_size / 1024 / 1024
             self.selected_item_var.set(
@@ -5406,6 +5446,68 @@ class CaptionApp:
             self.selected_item_var.set(
                 f"{path.name}  ·  {STATUS_TEXT[status]}"
             )
+
+    def _set_result_feedback(
+        self, state: str, elapsed_seconds: float | None = None
+    ) -> None:
+        if self._result_feedback_after_id is not None:
+            try:
+                self.root.after_cancel(self._result_feedback_after_id)
+            except tk.TclError:
+                pass
+            self._result_feedback_after_id = None
+        elapsed = (
+            f" · {float(elapsed_seconds):.1f} 秒"
+            if elapsed_seconds is not None
+            else ""
+        )
+        messages = {
+            "idle": ("● 等待选择素材", "SurfaceMuted.TLabel", "标注结果"),
+            "empty": ("● 当前素材尚无标注", "SurfaceMuted.TLabel", "标注结果"),
+            "loaded": ("● 已载入当前 TXT", "SurfaceMuted.TLabel", "标注结果"),
+            "multiple": ("● 已选择多项素材", "SurfaceMuted.TLabel", "标注结果"),
+            "running": (
+                "● 正在生成新标注，完成后将自动覆盖",
+                "SurfaceMuted.TLabel",
+                "标注结果 · 生成中",
+            ),
+            "success": (
+                f"● 标注结果已更新{elapsed}",
+                "StatusSuccess.TLabel",
+                "标注结果 · 已更新",
+            ),
+            "failed": (
+                f"● 生成失败，已保留原标注{elapsed}",
+                "StatusError.TLabel",
+                "标注结果 · 失败",
+            ),
+            "cancelled": (
+                f"● 任务已停止，已保留原标注{elapsed}",
+                "SurfaceMuted.TLabel",
+                "标注结果 · 已停止",
+            ),
+        }
+        text, style, tab_text = messages.get(state, messages["idle"])
+        self.result_state_var.set(text)
+        self.result_state_label.configure(style=style)
+        self.inspector_tabs.tab(self.result_tab, text=tab_text)
+        if state not in {"success", "failed", "cancelled"}:
+            return
+
+        def settle_feedback() -> None:
+            self._result_feedback_after_id = None
+            if self.closing:
+                return
+            if len(self.selected_paths) == 1:
+                self.result_state_var.set("● 已载入当前 TXT")
+            else:
+                self.result_state_var.set("● 等待选择素材")
+            self.result_state_label.configure(style="SurfaceMuted.TLabel")
+            self.inspector_tabs.tab(self.result_tab, text="标注结果")
+
+        self._result_feedback_after_id = self.root.after(
+            3500, settle_feedback
+        )
 
     def _set_orphan_item(self, path: Path) -> None:
         self.items[str(path)] = {
@@ -5630,8 +5732,13 @@ class CaptionApp:
                 path = payload["path"]
                 status = payload["status"]
                 detail = payload.get("detail", "")
-                self._set_item(path, status, detail)
                 elapsed = payload.get("elapsed_seconds")
+                self._set_item(
+                    path,
+                    status,
+                    detail,
+                    elapsed_seconds=elapsed,
+                )
                 elapsed_text = (
                     f" · {float(elapsed):.1f} 秒"
                     if elapsed is not None and status != "running"
@@ -5767,6 +5874,7 @@ class CaptionApp:
         if not paths:
             self.preview_label.config(image="", text="选择任务项")
             self.selected_item_var.set("尚未选择素材")
+            self._set_result_feedback("idle")
             self.preview_image = None
             return
         if len(paths) > 1:
@@ -5775,6 +5883,7 @@ class CaptionApp:
             self.result_text.insert(
                 "1.0", "孤立 TXT 不会进入打标或训练数据导出。"
             )
+            self._set_result_feedback("multiple")
             self.preview_image = None
             return
         path = paths[0]
@@ -5795,6 +5904,7 @@ class CaptionApp:
                 self.result_text.insert("1.0", path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError) as error:
                 self.result_text.insert("1.0", f"读取 TXT 失败：{error}")
+            self._set_result_feedback("loaded")
             self.preview_image = None
             return
         caption_path = caption_path_for(path)
@@ -5802,8 +5912,12 @@ class CaptionApp:
             try:
                 self.result_text.insert("1.0", caption_path.read_text(encoding="utf-8"))
                 self.save_result_button.config(state=tk.NORMAL)
+                self._set_result_feedback("loaded")
             except (OSError, UnicodeError) as error:
                 self.result_text.insert("1.0", f"读取结果失败：{error}")
+                self._set_result_feedback("failed")
+        else:
+            self._set_result_feedback("empty")
         if path.suffix.casefold() in {".mp4", ".mov", ".avi"}:
             size_mb = path.stat().st_size / 1024 / 1024
             self.preview_label.config(image="", text=f"{path.name}\n{size_mb:.1f} MB")
@@ -5965,6 +6079,7 @@ class CaptionApp:
             self.splash_after_id,
             self.update_after_id,
             self._preview_resize_after,
+            self._result_feedback_after_id,
         ):
             if after_id is not None:
                 try:
@@ -5981,6 +6096,7 @@ class CaptionApp:
         self.sash_after_id = None
         self.splash_after_id = None
         self._preview_resize_after = None
+        self._result_feedback_after_id = None
         self.root.destroy()
 
 

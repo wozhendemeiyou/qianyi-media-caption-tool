@@ -4,8 +4,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-72%20passed-35B46F)](./tests)
-[![Version](https://img.shields.io/badge/Release-v3.6.1-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
+[![Tests](https://img.shields.io/badge/Tests-73%20passed-35B46F)](./tests)
+[![Version](https://img.shields.io/badge/Release-v3.6.2-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
 
@@ -214,7 +214,7 @@ python -m venv .venv312
 ## 构建 Windows EXE
 
 ```powershell
-.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.1.spec
+.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.2.spec
 ```
 
 构建配置只收集运行所需代码与视觉资源，不打入 API Key、用户设置、项目记录或本地模型权重。如果存在 `assets/media/`，构建时会一并收集 FFmpeg 媒体组件。
@@ -230,7 +230,7 @@ python -m venv .venv312
 ├── media_caption_core.py         # 扫描、模型路由、HTTP、日志与批任务
 ├── media_caption_worker.py       # 按需媒体 Worker、安全通信与 FFmpeg 接口
 ├── media_caption_tool_v3.py      # Tkinter 桌面工作台
-├── MediaCaptionTool-3.6.1.spec   # PyInstaller 单文件构建
+├── MediaCaptionTool-3.6.2.spec   # PyInstaller 单文件构建
 ├── CHANGELOG.md                  # 每次公开版本的完整更新记录
 ├── SECURITY.md                   # 凭据、模板、本地数据与发布边界
 ├── requirements.txt              # 基础依赖

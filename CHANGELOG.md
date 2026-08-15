@@ -2,6 +2,14 @@
 
 本文件记录芊熠智能打标工作台每个公开版本的主要变化。日期均使用北京时间。
 
+## [3.6.2] - 2026-08-15
+
+- 修复当前选中图片二次打标完成后，右侧“标注结果”仍显示旧内容、必须重新选择素材才会刷新的问题。
+- 明确验证同名 sidecar TXT 会通过原子替换完整重写，不会把新旧标注拼接或残留在同一文件中。
+- 结果区新增“正在生成”“结果已更新”“失败并保留原标注”反馈，并在完成后自动滚动到新结果顶部。
+- 运行日志新增每项素材的实际处理耗时，便于区分本地处理、网络和模型服务端延迟。
+- 修复关闭窗口后可能残留图片预览定时回调的问题；自动化测试增至 73 项。
+
 ## [3.6.1] - 2026-08-15
 
 - 修复 Windows 自动更新器错误组合 `DETACHED_PROCESS` 与 PowerShell，导致下载完成后未执行覆盖和重启的问题。
@@ -85,6 +93,7 @@
 - API Key 使用 Windows DPAPI 加密，本地视觉语言模型可选单并发运行。
 - 44 项自动化测试与标准离线压力测试通过。
 
+[3.6.2]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.2
 [3.6.1]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.1
 [3.6.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6
 [3.5.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.5

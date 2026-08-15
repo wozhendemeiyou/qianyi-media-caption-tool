@@ -208,9 +208,26 @@ class GuiTests(unittest.TestCase):
                     "old caption",
                     app.result_text.get("1.0", tk.END).strip(),
                 )
+                self.assertIn("已载入", app.result_state_var.get())
+
+                app._set_item(image_path, "running", "正在请求模型")
+                self.assertEqual(
+                    "old caption",
+                    app.result_text.get("1.0", tk.END).strip(),
+                )
+                self.assertIn("正在生成", app.result_state_var.get())
+                self.assertIn(
+                    "生成中",
+                    app.inspector_tabs.tab(app.result_tab, option="text"),
+                )
 
                 core.write_caption(image_path, "new caption")
-                app._set_item(image_path, "success", "new caption")
+                app._set_item(
+                    image_path,
+                    "success",
+                    "new caption",
+                    elapsed_seconds=1.26,
+                )
 
                 self.assertEqual(
                     "new caption",
@@ -223,6 +240,12 @@ class GuiTests(unittest.TestCase):
                 self.assertNotIn("old caption", app.result_text.get("1.0", tk.END))
                 self.assertIn(
                     gui.STATUS_TEXT["success"], app.selected_item_var.get()
+                )
+                self.assertIn("已更新", app.result_state_var.get())
+                self.assertIn("1.3 秒", app.result_state_var.get())
+                self.assertIn(
+                    "已更新",
+                    app.inspector_tabs.tab(app.result_tab, option="text"),
                 )
             finally:
                 root.update_idletasks()
