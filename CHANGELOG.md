@@ -2,6 +2,12 @@
 
 本文件记录芊熠智能打标工作台每个公开版本的主要变化。日期均使用北京时间。
 
+## [3.6.3] - 2026-08-15
+
+- 为 Windows EXE 增加标准版本资源，资源管理器可显示公司名、产品名称、文件说明、文件版本、产品版本、版权、内部名称和原始文件名。
+- 公司名统一为“芊熠智能”，产品名统一为“芊熠智能打标工作台”，文件版本升级为 `3.6.3.0`。
+- 增加构建配置一致性测试，避免应用版本、PyInstaller 文件名与 Windows 版本资源发生漂移。
+
 ## [3.6.2] - 2026-08-15
 
 - 修复当前选中图片二次打标完成后，右侧“标注结果”仍显示旧内容、必须重新选择素材才会刷新的问题。
@@ -93,6 +99,7 @@
 - API Key 使用 Windows DPAPI 加密，本地视觉语言模型可选单并发运行。
 - 44 项自动化测试与标准离线压力测试通过。
 
+[3.6.3]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.3
 [3.6.2]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.2
 [3.6.1]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.1
 [3.6.0]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6

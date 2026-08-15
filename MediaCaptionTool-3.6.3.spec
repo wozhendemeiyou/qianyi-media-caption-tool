@@ -36,7 +36,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="MediaCaptionTool-3.6.2-Studio",
+    name="MediaCaptionTool-3.6.3-Studio",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -50,4 +50,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="assets/qianyi-app.ico",
+    version="assets/qianyi-version-info.txt",
 )

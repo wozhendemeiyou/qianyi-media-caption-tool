@@ -2,6 +2,7 @@ import csv
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 import time
@@ -45,6 +46,41 @@ class CoreTests(unittest.TestCase):
         self.assertEqual("", core.DEFAULT_SETTINGS["user_prompt"])
         self.assertEqual("", core.DEFAULT_SETTINGS["selected_preset"])
         self.assertEqual({}, core.DEFAULT_SETTINGS["prompt_presets"])
+
+    def test_windows_version_resource_matches_app_version(self):
+        project_root = Path(core.__file__).resolve().parent
+        version_resource = (
+            project_root / "assets" / "qianyi-version-info.txt"
+        ).read_text(encoding="utf-8")
+        version_parts = tuple(int(part) for part in core.APP_VERSION.split("."))
+        version_quad = (*version_parts, 0)
+        formatted_quad = ", ".join(str(part) for part in version_quad)
+        self.assertIn(f"filevers=({formatted_quad})", version_resource)
+        self.assertIn(f"prodvers=({formatted_quad})", version_resource)
+        for key, value in {
+            "CompanyName": "芊熠智能",
+            "FileDescription": "芊熠智能打标工作台",
+            "FileVersion": f"{core.APP_VERSION}.0",
+            "InternalName": "QianyiMediaCaptionTool",
+            "OriginalFilename": "Qianyi-MediaCaptionTool.exe",
+            "ProductName": "芊熠智能打标工作台",
+            "ProductVersion": core.APP_VERSION,
+        }.items():
+            self.assertRegex(
+                version_resource,
+                rf'StringStruct\(\s*"{re.escape(key)}",\s*'
+                rf'"{re.escape(value)}"\s*\)',
+            )
+        spec_path = project_root / f"MediaCaptionTool-{core.APP_VERSION}.spec"
+        self.assertTrue(spec_path.is_file())
+        spec_text = spec_path.read_text(encoding="utf-8")
+        self.assertIn(
+            'version="assets/qianyi-version-info.txt"', spec_text
+        )
+        self.assertIn(
+            f'name="MediaCaptionTool-{core.APP_VERSION}-Studio"',
+            spec_text,
+        )
 
     def test_github_release_version_comparison_and_payload(self):
         self.assertEqual((3, 10, 2), core.version_tuple("release-v3.10.2"))

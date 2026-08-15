@@ -61,6 +61,7 @@ UI_FONT = "HarmonyOS Sans SC"
 LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
 RELEASE_NOTES = (
+    "为 Windows EXE 补充公司名、产品名、版本号与版权信息",
     "二次打标完成后立即覆盖刷新当前标注结果与 TXT",
     "结果区新增生成中、已更新、失败保留和单项耗时反馈",
     "采用现代包豪斯日光模式与灰绿色夜光模式",
