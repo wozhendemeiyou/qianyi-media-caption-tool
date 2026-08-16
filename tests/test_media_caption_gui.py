@@ -1382,6 +1382,152 @@ class GuiTests(unittest.TestCase):
                 root.update_idletasks()
                 app.close()
 
+    def test_cached_combobox_popdowns_and_menus_follow_theme_roundtrips(self):
+        def popdown_paths(combobox: ttk.Combobox) -> tuple[str, str, str]:
+            popdown = str(
+                combobox.tk.call(
+                    "ttk::combobox::PopdownWindow", combobox._w
+                )
+            )
+            return popdown, f"{popdown}.f.l", f"{popdown}.f.sb"
+
+        def assert_popdown_palette(
+            combobox: ttk.Combobox, palette: dict[str, str]
+        ) -> None:
+            popdown, listbox, scrollbar = popdown_paths(combobox)
+            self.assertEqual(
+                palette["input_border"],
+                combobox.tk.call(popdown, "cget", "-background"),
+            )
+            expected = {
+                "-background": palette["input_bg"],
+                "-foreground": palette["text"],
+                "-selectbackground": palette["selection"],
+                "-selectforeground": palette["text"],
+                "-disabledforeground": palette["disabled_fg"],
+                "-highlightbackground": palette["input_border"],
+                "-highlightcolor": palette["input_focus"],
+            }
+            for option, value in expected.items():
+                self.assertEqual(
+                    value,
+                    combobox.tk.call(listbox, "cget", option),
+                    f"{combobox} {option}",
+                )
+            self.assertEqual(
+                "TScrollbar",
+                combobox.tk.call(scrollbar, "cget", "-style"),
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            dialog = None
+            try:
+                base_comboboxes = [
+                    widget
+                    for widget in app._walk_widget_tree()
+                    if isinstance(widget, ttk.Combobox)
+                ]
+                self.assertGreaterEqual(len(base_comboboxes), 8)
+
+                for theme_key in ("night", "day", "night", "day"):
+                    stale_key = "day" if theme_key == "night" else "night"
+                    stale = gui.THEMES[stale_key]
+                    for combobox in base_comboboxes:
+                        popdown, listbox, _scrollbar = popdown_paths(combobox)
+                        combobox.tk.call(
+                            popdown,
+                            "configure",
+                            "-background",
+                            stale["input_border"],
+                        )
+                        combobox.tk.call(
+                            listbox,
+                            "configure",
+                            "-background",
+                            stale["input_bg"],
+                            "-foreground",
+                            stale["text"],
+                            "-selectbackground",
+                            stale["selection"],
+                        )
+                    for menu in tuple(app._themed_menus):
+                        menu.configure(
+                            background=stale["surface_alt"],
+                            foreground=stale["text"],
+                        )
+
+                    app._set_theme(theme_key)
+                    root.update_idletasks()
+                    root.update()
+                    palette = gui.THEMES[theme_key]
+                    for combobox in base_comboboxes:
+                        assert_popdown_palette(combobox, palette)
+                    self.assertEqual(
+                        palette["surface_alt"],
+                        str(app.export_menu.cget("background")),
+                    )
+                    self.assertEqual(
+                        palette["surface_alt"],
+                        str(app.batch_menu.cget("background")),
+                    )
+
+                dialog = app.open_platform_config()
+                app._set_theme("night")
+                root.update_idletasks()
+                root.update()
+                for combobox in (
+                    dialog.qianyi_model_box,
+                    dialog.qianyi_route_box,
+                ):
+                    assert_popdown_palette(combobox, gui.THEMES["night"])
+                self.assertEqual(
+                    gui.THEMES["night"]["input_bg"],
+                    str(dialog.qianyi_provider_menu.cget("background")),
+                )
+                for switch in (
+                    dialog.qianyi_mtp_switch,
+                    dialog.qianyi_thinking_switch,
+                ):
+                    self.assertEqual(
+                        gui.THEMES["night"]["bg"],
+                        switch.canvas.cget("background"),
+                    )
+
+                app._set_theme("day")
+                root.update_idletasks()
+                root.update()
+                for combobox in (
+                    dialog.qianyi_model_box,
+                    dialog.qianyi_route_box,
+                ):
+                    assert_popdown_palette(combobox, gui.THEMES["day"])
+                self.assertEqual(
+                    gui.THEMES["day"]["input_bg"],
+                    str(dialog.qianyi_provider_menu.cget("background")),
+                )
+                for switch in (
+                    dialog.qianyi_mtp_switch,
+                    dialog.qianyi_thinking_switch,
+                ):
+                    self.assertEqual(
+                        gui.THEMES["day"]["bg"],
+                        switch.canvas.cget("background"),
+                    )
+            finally:
+                if dialog is not None and dialog.winfo_exists():
+                    try:
+                        dialog.grab_release()
+                    except tk.TclError:
+                        pass
+                    dialog.destroy()
+                root.update_idletasks()
+                app.close()
+
     def test_rendered_native_text_colors_survive_theme_and_view_roundtrips(self):
         def rgb(value: str) -> tuple[int, int, int]:
             normalized = value.removeprefix("#")

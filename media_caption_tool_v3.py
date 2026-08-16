@@ -61,6 +61,8 @@ UI_FONT = "HarmonyOS Sans SC"
 LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
 RELEASE_NOTES = (
+    "彻底修复下拉弹层在日光与夜光模式切换后残留上一主题颜色",
+    "统一同步全部下拉框、菜单、动态设置弹窗、文本区与开关控件",
     "为 Windows EXE 补充公司名、产品名、版本号与版权信息",
     "修复旧版立即更新后继承失效 _MEI 目录导致 Python DLL 加载失败",
     "平台设置标题新增 MTP 加速与思考标签清理滑块",
@@ -855,6 +857,8 @@ class CaptionApp:
         self._form_style_images: dict[str, ImageTk.PhotoImage] = {}
         self._themed_text_widgets: dict[tk.Text, bool] = {}
         self._bound_text_widgets: set[tk.Text] = set()
+        self._bound_comboboxes: set[ttk.Combobox] = set()
+        self._themed_menus: dict[tk.Menu, str] = {}
         self._theme_sync_after_ids: set[str] = set()
         self.theme_buttons: dict[str, list[ttk.Button]] = {
             "night": [],
@@ -1249,12 +1253,10 @@ class CaptionApp:
             ],
             foreground=[("disabled", COLORS["disabled_fg"])],
         )
-        # The Combobox popdown is a native Listbox and does not inherit ttk colors.
-        self.root.option_add("*TCombobox*Listbox.background", COLORS["input_bg"])
-        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
-        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["selection"])
-        self.root.option_add("*TCombobox*Listbox.selectForeground", COLORS["text"])
-        self.root.option_add("*TCombobox*Listbox.font", text_font)
+        # Popup Listboxes are synchronized explicitly because ttk caches them
+        # after the first opening. The option database covers newly created
+        # popdowns, while ``_sync_combobox_popdowns`` repairs existing ones.
+        self.root.option_add("*TCombobox*Listbox.font", text_font, "interactive")
         indicator_options = {
             "indicatorcolor": COLORS["input_bg"],
             "indicatorrelief": tk.FLAT,
@@ -1386,6 +1388,15 @@ class CaptionApp:
             darkcolor=COLORS["surface_alt"], arrowcolor=COLORS["muted"],
             borderwidth=0, relief=tk.FLAT,
         )
+        style.configure(
+            "ComboboxPopdown.TFrame",
+            background=COLORS["input_bg"],
+            bordercolor=COLORS["input_border"],
+            lightcolor=COLORS["input_border"],
+            darkcolor=COLORS["input_border"],
+            borderwidth=0,
+            relief=tk.FLAT,
+        )
         style.configure("TSeparator", background=COLORS["border"])
 
     def _apply_tk_palette(self) -> None:
@@ -1405,6 +1416,8 @@ class CaptionApp:
                 "selectBackground", COLORS["selection"],
                 "selectForeground", COLORS["text"],
                 "highlightColor", COLORS["input_focus"],
+                "highlightBackground", COLORS["input_border"],
+                "insertBackground", COLORS["text"],
                 "disabledForeground", COLORS["disabled_fg"],
                 "troughColor", COLORS["surface"],
             )
@@ -1420,8 +1433,25 @@ class CaptionApp:
             ("*Listbox.foreground", COLORS["text"]),
             ("*Listbox.selectBackground", COLORS["selection"]),
             ("*Listbox.selectForeground", COLORS["text"]),
+            ("*Listbox.disabledForeground", COLORS["disabled_fg"]),
+            ("*Listbox.highlightBackground", COLORS["input_border"]),
+            ("*Listbox.highlightColor", COLORS["input_focus"]),
+            ("*Menu.background", COLORS["surface_alt"]),
+            ("*Menu.foreground", COLORS["text"]),
+            ("*Menu.activeBackground", COLORS["hover"]),
+            ("*Menu.activeForeground", COLORS["text"]),
+            ("*Menu.disabledForeground", COLORS["disabled_fg"]),
+            ("*TCombobox*Listbox.background", COLORS["input_bg"]),
+            ("*TCombobox*Listbox.foreground", COLORS["text"]),
+            ("*TCombobox*Listbox.selectBackground", COLORS["selection"]),
+            ("*TCombobox*Listbox.selectForeground", COLORS["text"]),
+            ("*TCombobox*Listbox.disabledForeground", COLORS["disabled_fg"]),
+            ("*TCombobox*Listbox.highlightBackground", COLORS["input_border"]),
+            ("*TCombobox*Listbox.highlightColor", COLORS["input_focus"]),
         ):
-            self.root.option_add(pattern, value, "widgetDefault")
+            # ``interactive`` outranks cached Windows/startup defaults and is
+            # also inherited by popdowns created after a theme switch.
+            self.root.option_add(pattern, value, "interactive")
 
     def _configure_rounded_form_element(self, style: ttk.Style) -> str:
         element_name = f"{self.theme_key.title()}.RoundedForm.field"
@@ -1541,13 +1571,9 @@ class CaptionApp:
                 foreground="#ffffff" if tone != "yellow" else "#171715",
             )
         self._sync_themed_text_widgets()
-        for menu in (self.export_menu, self.batch_menu):
-            menu.configure(
-                background=COLORS["surface_alt"],
-                foreground=COLORS["text"],
-                activebackground=COLORS["hover"],
-                activeforeground=COLORS["text"],
-            )
+        self._sync_themed_menus()
+        self._sync_combobox_popdowns()
+        self._sync_slide_switches()
         self.tree.tag_configure("failed", foreground=COLORS["danger"])
         self.tree.tag_configure("success", foreground=COLORS["success"])
         self.tree.tag_configure("running", foreground=COLORS["info"])
@@ -2390,12 +2416,8 @@ class CaptionApp:
 
         self.export_menu = export_menu
         self.batch_menu = batch_menu
-        for menu in (self.export_menu, self.batch_menu):
-            menu.configure(
-                background=COLORS["surface_alt"], foreground=COLORS["text"],
-                activebackground=COLORS["hover"], activeforeground=COLORS["text"],
-                borderwidth=1,
-            )
+        self._register_themed_menu(self.export_menu, "surface")
+        self._register_themed_menu(self.batch_menu, "surface")
 
     def _build_sampling_panel(self, parent: ttk.Frame) -> None:
         self.sampling_support_var = tk.StringVar()
@@ -3653,6 +3675,164 @@ class CaptionApp:
         self._set_stage(1)
         self._restore_idle_controls()
 
+    def _walk_widget_tree(self):
+        """Yield every live widget, including widgets in open child dialogs."""
+        pending = [self.root]
+        seen: set[str] = set()
+        while pending:
+            parent = pending.pop()
+            try:
+                path = str(parent)
+                if path in seen or not parent.winfo_exists():
+                    continue
+                seen.add(path)
+                children = parent.winfo_children()
+            except tk.TclError:
+                continue
+            yield parent
+            pending.extend(children)
+
+    def _register_themed_menu(self, menu: tk.Menu, role: str = "surface") -> None:
+        self._themed_menus[menu] = "input" if role == "input" else "surface"
+        self._style_themed_menu(menu)
+
+    def _style_themed_menu(self, menu: tk.Menu) -> None:
+        role = self._themed_menus.get(menu, "surface")
+        background = (
+            COLORS["input_bg"] if role == "input" else COLORS["surface_alt"]
+        )
+        active_background = (
+            COLORS["selection"] if role == "input" else COLORS["hover"]
+        )
+        try:
+            if not menu.winfo_exists():
+                self._themed_menus.pop(menu, None)
+                return
+            menu.configure(
+                background=background,
+                foreground=COLORS["text"],
+                activebackground=active_background,
+                activeforeground=COLORS["text"],
+                disabledforeground=COLORS["disabled_fg"],
+                selectcolor=COLORS["accent"],
+                borderwidth=1,
+                activeborderwidth=0,
+                relief=tk.FLAT,
+            )
+        except tk.TclError:
+            self._themed_menus.pop(menu, None)
+
+    def _sync_themed_menus(self) -> None:
+        for menu in tuple(self._themed_menus):
+            self._style_themed_menu(menu)
+
+    def _style_combobox_popdown(self, combobox: ttk.Combobox) -> None:
+        """Apply the active palette to ttk's cached native popup Listbox."""
+        try:
+            if not combobox.winfo_exists():
+                self._bound_comboboxes.discard(combobox)
+                return
+            popdown = str(
+                combobox.tk.call(
+                    "ttk::combobox::PopdownWindow", combobox._w
+                )
+            )
+            frame = f"{popdown}.f"
+            listbox = f"{frame}.l"
+            scrollbar = f"{frame}.sb"
+            combobox.tk.call(
+                popdown,
+                "configure",
+                "-background",
+                COLORS["input_border"],
+            )
+            combobox.tk.call(
+                frame,
+                "configure",
+                "-style",
+                "ComboboxPopdown.TFrame",
+            )
+            combobox.tk.call(
+                listbox,
+                "configure",
+                "-background",
+                COLORS["input_bg"],
+                "-foreground",
+                COLORS["text"],
+                "-selectbackground",
+                COLORS["selection"],
+                "-selectforeground",
+                COLORS["text"],
+                "-disabledforeground",
+                COLORS["disabled_fg"],
+                "-highlightbackground",
+                COLORS["input_border"],
+                "-highlightcolor",
+                COLORS["input_focus"],
+                "-highlightthickness",
+                1,
+                "-borderwidth",
+                0,
+                "-selectborderwidth",
+                0,
+                "-relief",
+                tk.FLAT,
+                "-activestyle",
+                "none",
+            )
+            combobox.tk.call(
+                scrollbar,
+                "configure",
+                "-style",
+                "TScrollbar",
+            )
+        except tk.TclError:
+            # A popdown can disappear while its dialog is being destroyed.
+            pass
+
+    def _register_combobox_theme(self, combobox: ttk.Combobox) -> None:
+        if combobox not in self._bound_comboboxes:
+            for sequence in (
+                "<Map>",
+                "<ButtonPress-1>",
+                "<KeyPress-F4>",
+                "<Alt-Down>",
+            ):
+                combobox.bind(
+                    sequence,
+                    lambda _event, target=combobox: self._style_combobox_popdown(
+                        target
+                    ),
+                    add="+",
+                )
+            self._bound_comboboxes.add(combobox)
+        self._style_combobox_popdown(combobox)
+
+    def _sync_combobox_popdowns(self) -> None:
+        live_comboboxes: set[ttk.Combobox] = set()
+        for widget in self._walk_widget_tree():
+            if isinstance(widget, ttk.Combobox):
+                live_comboboxes.add(widget)
+                self._register_combobox_theme(widget)
+        for combobox in tuple(self._bound_comboboxes - live_comboboxes):
+            try:
+                exists = bool(combobox.winfo_exists())
+            except tk.TclError:
+                exists = False
+            if not exists:
+                self._bound_comboboxes.discard(combobox)
+
+    def _sync_slide_switches(self) -> None:
+        for widget in self._walk_widget_tree():
+            if isinstance(widget, SlideSwitch):
+                widget.redraw()
+
+    def _sync_native_theme_widgets(self) -> None:
+        self._sync_themed_text_widgets()
+        self._sync_combobox_popdowns()
+        self._sync_themed_menus()
+        self._sync_slide_switches()
+
     def _style_text(
         self,
         widget: tk.Text,
@@ -3773,27 +3953,19 @@ class CaptionApp:
         )
 
     def _discover_themed_text_widgets(self) -> None:
-        pending = [self.root]
-        while pending:
-            parent = pending.pop()
+        for widget in self._walk_widget_tree():
+            if not isinstance(widget, tk.Text) or widget in self._themed_text_widgets:
+                continue
             try:
-                children = parent.winfo_children()
+                readonly = str(widget.cget("state")) == tk.DISABLED
             except tk.TclError:
                 continue
-            pending.extend(children)
-            for child in children:
-                if not isinstance(child, tk.Text) or child in self._themed_text_widgets:
-                    continue
-                try:
-                    readonly = str(child.cget("state")) == tk.DISABLED
-                except tk.TclError:
-                    continue
-                self._style_text(
-                    child,
-                    readonly=readonly,
-                    palette=THEMES[self.theme_key],
-                    register=True,
-                )
+            self._style_text(
+                widget,
+                readonly=readonly,
+                palette=THEMES[self.theme_key],
+                register=True,
+            )
 
     def _sync_themed_text_widgets(self) -> None:
         self._discover_themed_text_widgets()
@@ -3821,7 +3993,7 @@ class CaptionApp:
             def sync() -> None:
                 self._theme_sync_after_ids.discard(after_id)
                 if not self.closing:
-                    self._sync_themed_text_widgets()
+                    self._sync_native_theme_widgets()
 
             after_id = (
                 self.root.after_idle(sync)
@@ -3830,7 +4002,7 @@ class CaptionApp:
             )
             self._theme_sync_after_ids.add(after_id)
 
-        # Tk and Windows can repaint native Text widgets after the ttk theme
+        # Tk and Windows can repaint cached native widgets after the ttk theme
         # pass. Verify the active palette both immediately and after mapping.
         for delay in (None, 20, 80, 220, 650):
             schedule(delay)
@@ -4585,6 +4757,7 @@ class CaptionApp:
             font=(UI_FONT, 10),
         )
         provider_button.configure(menu=provider_menu)
+        self._register_themed_menu(provider_menu, "input")
 
         portal_button = ttk.Button(api_frame, text="获取 API Key ↗", width=17)
         portal_button.grid(row=0, column=2, sticky=tk.E)
