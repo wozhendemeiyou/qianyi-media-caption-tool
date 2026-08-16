@@ -53,6 +53,111 @@ class GuiTests(unittest.TestCase):
         root.minsize.assert_called_once_with(1024, 720)
         root.state.assert_not_called()
 
+    def test_gallery_resize_reflows_existing_cards_without_rebuilding(self):
+        root = tk.Tk()
+        root.geometry("900x700+40+40")
+        gallery = gui.MediaGallery(
+            root,
+            lambda _path, _extend: None,
+            lambda _path: None,
+            lambda _path: None,
+        )
+        gallery.pack(fill=tk.BOTH, expand=True)
+        try:
+            root.update()
+            items = [
+                {"path": Path(f"image-{index}.png"), "status": "pending"}
+                for index in range(8)
+            ]
+            gallery.set_items(items, set())
+            root.update_idletasks()
+            original_cards = dict(gallery.card_frames)
+            target_columns = gallery._configured_columns + 1
+            target_width = target_columns * 190
+
+            with (
+                mock.patch.object(
+                    gallery.canvas, "winfo_width", return_value=target_width
+                ),
+                mock.patch.object(
+                    gallery.canvas, "winfo_ismapped", return_value=True
+                ),
+            ):
+                gallery.refresh_layout()
+
+            self.assertEqual(target_columns, gallery._configured_columns)
+            self.assertEqual(set(original_cards), set(gallery.card_frames))
+            for key, card in original_cards.items():
+                self.assertIs(card, gallery.card_frames[key])
+                self.assertTrue(card.winfo_exists())
+            self.assertEqual(
+                1,
+                int(gallery.card_frames[str(items[target_columns]["path"])].grid_info()["row"]),
+            )
+
+            gallery._canvas_resized(SimpleNamespace(width=target_width + 10))
+            self.assertIsNone(gallery._render_after)
+            gallery._canvas_resized(SimpleNamespace(width=1))
+            self.assertIsNone(gallery._render_after)
+        finally:
+            root.destroy()
+
+    def test_preview_cache_and_layout_modes_skip_redundant_redraws(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            image_path = root_path / "preview.png"
+            Image.new("RGB", (640, 480), "#42637a").save(image_path)
+            root = tk.Tk()
+            app = gui.CaptionApp(
+                root, self._store(root_path), show_splash=False
+            )
+            try:
+                app.show_workspace()
+                root.update()
+                app.items[str(image_path)] = {
+                    "path": image_path,
+                    "status": "pending",
+                    "is_orphan": False,
+                }
+                app.selected_paths = {str(image_path)}
+                with mock.patch.object(
+                    gui, "open_image", wraps=gui.open_image
+                ) as open_mock:
+                    app._refresh_selected_preview()
+                    app._refresh_selected_preview()
+                self.assertEqual(1, open_mock.call_count)
+
+                header_width = (
+                    1300 if app._workspace_header_layout == "wide" else 1000
+                )
+                filter_width = 900 if app._filter_bar_layout == "wide" else 620
+                with (
+                    mock.patch.object(
+                        app.workspace_title_block,
+                        "grid_forget",
+                        wraps=app.workspace_title_block.grid_forget,
+                    ) as title_forget,
+                    mock.patch.object(
+                        app.search_entry,
+                        "grid_forget",
+                        wraps=app.search_entry.grid_forget,
+                    ) as search_forget,
+                ):
+                    app._layout_workspace_header(header_width)
+                    app._layout_filter_bar(filter_width)
+                title_forget.assert_not_called()
+                search_forget.assert_not_called()
+
+                app._window_unmapped(SimpleNamespace(widget=root))
+                self.assertTrue(app._window_suspended)
+                app._preview_resized(SimpleNamespace(width=600, height=400))
+                self.assertIsNone(app._preview_resize_after)
+                app._resume_after_window_map()
+                self.assertFalse(app._window_suspended)
+            finally:
+                root.update_idletasks()
+                app.close()
+
     def test_public_build_starts_with_an_empty_prompt_library(self):
         with tempfile.TemporaryDirectory() as directory:
             root = tk.Tk()

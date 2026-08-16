@@ -66,6 +66,8 @@ UI_FONT = "HarmonyOS Sans SC"
 LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
 RELEASE_NOTES = (
+    "修复窗口最小化后恢复或最大化时工作区、缩略图与图标闪烁的问题",
+    "缩略图改为原位响应式重排，预览图片加入内存与尺寸缓存，恢复窗口不再重复解码",
     "LM Studio 新增低显存安全、纯 CPU 与沿用预设三种加载策略",
     "修复一键加载丢失 GPU、上下文、并行和 MTP 参数导致后端崩溃",
     "LM Studio 请求阶段真正关闭思考，并将打标输出安全上限提升至 768 tokens",
@@ -671,22 +673,76 @@ class MediaGallery(ttk.Frame):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
     def destroy(self):
-        if self._render_after is not None:
-            try:
-                self.after_cancel(self._render_after)
-            except tk.TclError:
-                pass
-            self._render_after = None
+        self.cancel_pending_layout()
         super().destroy()
 
     def _content_resized(self, _event=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _canvas_resized(self, event) -> None:
-        self.canvas.itemconfigure(self.window_id, width=event.width)
-        if self._render_after is not None:
+        width = max(1, int(event.width))
+        try:
+            self.canvas.itemconfigure(self.window_id, width=width)
+        except tk.TclError:
+            return
+        if width <= 1 or self._toplevel_is_iconic():
+            self.cancel_pending_layout()
+            return
+        if self._columns_for_width(width) == self._configured_columns:
+            return
+        self.cancel_pending_layout()
+        self._render_after = self.after(80, self.refresh_layout)
+
+    @staticmethod
+    def _columns_for_width(width: int) -> int:
+        return max(2, max(320, int(width)) // 190)
+
+    def _toplevel_is_iconic(self) -> bool:
+        try:
+            return str(self.winfo_toplevel().state()) in {"iconic", "withdrawn"}
+        except tk.TclError:
+            return True
+
+    def cancel_pending_layout(self) -> None:
+        if self._render_after is None:
+            return
+        try:
             self.after_cancel(self._render_after)
-        self._render_after = self.after(100, self.render)
+        except tk.TclError:
+            pass
+        self._render_after = None
+
+    def _configure_grid_columns(self, columns: int) -> None:
+        for column in range(max(self._configured_columns, columns)):
+            self.content.grid_columnconfigure(
+                column, weight=0, minsize=0, uniform=""
+            )
+        for column in range(columns):
+            self.content.grid_columnconfigure(column, weight=1, uniform="gallery")
+        self._configured_columns = columns
+
+    def refresh_layout(self) -> None:
+        self._render_after = None
+        if self._toplevel_is_iconic():
+            return
+        try:
+            width = self.canvas.winfo_width()
+            if width <= 1 or not self.canvas.winfo_ismapped():
+                return
+            self.canvas.itemconfigure(self.window_id, width=width)
+        except tk.TclError:
+            return
+        columns = self._columns_for_width(width)
+        if columns == self._configured_columns:
+            return
+        self._configure_grid_columns(columns)
+        start = self.page * self.page_size
+        page_items = self.items[start : start + self.page_size]
+        for index, item in enumerate(page_items):
+            card = self.card_frames.get(str(item["path"]))
+            if card is not None and card.winfo_exists():
+                card.grid_configure(row=index // columns, column=index % columns)
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _mousewheel(self, event) -> None:
         if self.winfo_ismapped():
@@ -715,7 +771,7 @@ class MediaGallery(ttk.Frame):
             self.render()
 
     def render(self) -> None:
-        self._render_after = None
+        self.cancel_pending_layout()
         for child in self.content.winfo_children():
             child.destroy()
         self.card_frames.clear()
@@ -723,16 +779,10 @@ class MediaGallery(ttk.Frame):
         self.status_labels.clear()
         self.canvas.yview_moveto(0)
         width = max(320, self.canvas.winfo_width())
-        columns = max(2, width // 190)
-        for column in range(max(self._configured_columns, columns)):
-            self.content.grid_columnconfigure(
-                column, weight=0, minsize=0, uniform=""
-            )
-        self._configured_columns = columns
+        columns = self._columns_for_width(width)
+        self._configure_grid_columns(columns)
         start = self.page * self.page_size
         page_items = self.items[start : start + self.page_size]
-        for column in range(columns):
-            self.content.grid_columnconfigure(column, weight=1, uniform="gallery")
         for index, item in enumerate(page_items):
             path = item["path"]
             key = str(path)
@@ -851,6 +901,9 @@ class CaptionApp:
         self.path_rows: dict[str, str] = {}
         self.last_failed_paths: list[Path] = []
         self.preview_image = None
+        self._preview_source_image: Image.Image | None = None
+        self._preview_source_key: tuple[str, int, int] | None = None
+        self._preview_render_key: tuple[str, int, int, int, int] | None = None
         self.closing = False
         self.selected_paths: set[str] = set()
         self.thumbnail_cache: dict[str, ImageTk.PhotoImage] = {}
@@ -888,6 +941,14 @@ class CaptionApp:
         self._bound_comboboxes: set[ttk.Combobox] = set()
         self._themed_menus: dict[tk.Menu, str] = {}
         self._theme_sync_after_ids: set[str] = set()
+        self._text_sync_after_ids: dict[tk.Text, str] = {}
+        self._workspace_header_layout: str | None = None
+        self._filter_bar_layout: str | None = None
+        self._canvas_heading_compact: bool | None = None
+        self._preview_panel_layout: tuple[int, int] | None = None
+        self._system_features_wraplength: int | None = None
+        self._window_suspended = False
+        self._window_resume_after_id = None
         self.theme_buttons: dict[str, list[ttk.Button]] = {
             "night": [],
             "day": [],
@@ -912,6 +973,8 @@ class CaptionApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._configure_style()
         self._build_ui()
+        self.root.bind("<Unmap>", self._window_unmapped, add="+")
+        self.root.bind("<Map>", self._window_mapped, add="+")
         self._install_form_wheel_guards()
         self._load_values()
         self._start_thumbnail_workers()
@@ -1711,85 +1774,171 @@ class CaptionApp:
         if show_bottom:
             self.task_settings_canvas.yview_moveto(1.0)
 
+    def _window_unmapped(self, event) -> None:
+        if self.closing or event.widget is not self.root:
+            return
+        self._window_suspended = True
+        if self._window_resume_after_id is not None:
+            try:
+                self.root.after_cancel(self._window_resume_after_id)
+            except tk.TclError:
+                pass
+            self._window_resume_after_id = None
+        if hasattr(self, "gallery"):
+            self.gallery.cancel_pending_layout()
+        if self._preview_resize_after is not None:
+            try:
+                self.root.after_cancel(self._preview_resize_after)
+            except tk.TclError:
+                pass
+            self._preview_resize_after = None
+        self._cancel_theme_sync_jobs()
+        self._cancel_text_sync_jobs()
+
+    def _window_mapped(self, event) -> None:
+        if self.closing or event.widget is not self.root or not self._window_suspended:
+            return
+        if self._window_resume_after_id is not None:
+            try:
+                self.root.after_cancel(self._window_resume_after_id)
+            except tk.TclError:
+                pass
+        self._window_resume_after_id = self.root.after(
+            90, self._resume_after_window_map
+        )
+
+    def _resume_after_window_map(self) -> None:
+        self._window_resume_after_id = None
+        if self.closing:
+            return
+        try:
+            if str(self.root.state()) in {"iconic", "withdrawn"}:
+                return
+        except tk.TclError:
+            return
+        self._window_suspended = False
+        if self.workspace_frame.winfo_manager() != "pack":
+            return
+        self._layout_workspace_header(self.workspace_header.winfo_width())
+        self._layout_filter_bar(self.filter_bar.winfo_width())
+        self.gallery.refresh_layout()
+        self._preview_resized()
+
     def _layout_workspace_header(self, width: int) -> None:
+        layout = "compact" if width < 1180 else "wide"
+        if layout == self._workspace_header_layout:
+            return
+        self._workspace_header_layout = layout
         title = self.workspace_title_block
         project = self.workspace_project_bar
         controls = self.workspace_topbar_controls
-        for widget in (title, project, controls):
-            widget.grid_forget()
-        title.grid(row=0, column=0, sticky=tk.W)
-        controls.grid(row=0, column=2, sticky=tk.E)
-        if width < 1180:
+        title.grid(
+            row=0, column=0, columnspan=1, sticky=tk.W, padx=0, pady=0
+        )
+        controls.grid(
+            row=0, column=2, columnspan=1, sticky=tk.E, padx=0, pady=0
+        )
+        if layout == "compact":
             project.grid(
                 row=1, column=0, columnspan=3, sticky=tk.EW,
-                pady=(8, 0),
+                padx=0, pady=(8, 0),
             )
         else:
             project.grid(
-                row=0, column=1, sticky=tk.EW, padx=(14, 10)
+                row=0, column=1, columnspan=1, sticky=tk.EW,
+                padx=(14, 10), pady=0,
             )
 
     def _layout_filter_bar(self, width: int) -> None:
-        widgets = (
-            self.search_entry,
-            self.filter_status_label,
-            self.filter_box,
-            self.gallery_view_button,
-            self.list_view_button,
-            self.selection_label,
-        )
-        for widget in widgets:
-            widget.grid_forget()
+        layout = "compact" if width < 760 else "wide"
+        if layout == self._filter_bar_layout:
+            return
+        self._filter_bar_layout = layout
         for column in range(6):
             self.filter_bar.grid_columnconfigure(column, weight=0)
 
-        if width < 760:
+        if layout == "compact":
             self.filter_bar.grid_columnconfigure(0, weight=1)
             self.search_entry.grid(
                 row=0, column=0, columnspan=5, sticky=tk.EW,
                 padx=(0, 10), pady=(0, 7),
             )
-            self.selection_label.grid(row=0, column=5, sticky=tk.E)
-            self.filter_status_label.grid(row=1, column=0, sticky=tk.W)
-            self.filter_box.grid(
-                row=1, column=1, sticky=tk.W, padx=(6, 12)
+            self.selection_label.grid(
+                row=0, column=5, columnspan=1, sticky=tk.E,
+                padx=0, pady=0,
             )
-            self.gallery_view_button.grid(row=1, column=2, sticky=tk.W)
+            self.filter_status_label.grid(
+                row=1, column=0, columnspan=1, sticky=tk.W,
+                padx=0, pady=0,
+            )
+            self.filter_box.grid(
+                row=1, column=1, columnspan=1, sticky=tk.W,
+                padx=(6, 12), pady=0,
+            )
+            self.gallery_view_button.grid(
+                row=1, column=2, columnspan=1, sticky=tk.W,
+                padx=0, pady=0,
+            )
             self.list_view_button.grid(
-                row=1, column=3, sticky=tk.W, padx=(4, 0)
+                row=1, column=3, columnspan=1, sticky=tk.W,
+                padx=(4, 0), pady=0,
             )
         else:
             self.filter_bar.grid_columnconfigure(0, weight=1)
-            self.search_entry.grid(row=0, column=0, sticky=tk.EW)
+            self.search_entry.grid(
+                row=0, column=0, columnspan=1, sticky=tk.EW,
+                padx=0, pady=0,
+            )
             self.filter_status_label.grid(
-                row=0, column=1, sticky=tk.W, padx=(12, 6)
+                row=0, column=1, columnspan=1, sticky=tk.W,
+                padx=(12, 6), pady=0,
             )
-            self.filter_box.grid(row=0, column=2, sticky=tk.W)
+            self.filter_box.grid(
+                row=0, column=2, columnspan=1, sticky=tk.W,
+                padx=0, pady=0,
+            )
             self.gallery_view_button.grid(
-                row=0, column=3, sticky=tk.W, padx=(12, 2)
+                row=0, column=3, columnspan=1, sticky=tk.W,
+                padx=(12, 2), pady=0,
             )
-            self.list_view_button.grid(row=0, column=4, sticky=tk.W)
+            self.list_view_button.grid(
+                row=0, column=4, columnspan=1, sticky=tk.W,
+                padx=0, pady=0,
+            )
             self.selection_label.grid(
-                row=0, column=5, sticky=tk.E, padx=(12, 0)
+                row=0, column=5, columnspan=1, sticky=tk.E,
+                padx=(12, 0), pady=0,
             )
 
     def _layout_preview_panel(self, event) -> None:
         viewport_height = max(140, min(390, event.height - 250))
+        wraplength = max(160, event.width - 20)
+        layout = (viewport_height, wraplength)
+        if layout == self._preview_panel_layout:
+            return
+        self._preview_panel_layout = layout
         if int(self.preview_viewport.cget("height")) != viewport_height:
             self.preview_viewport.configure(height=viewport_height)
-        self.selected_item_label.configure(wraplength=max(160, event.width - 20))
+        self.selected_item_label.configure(wraplength=wraplength)
 
     def _layout_canvas_heading(self, event) -> None:
         subtitle = getattr(self.canvas_heading, "subtitle_label", None)
         if subtitle is None:
             return
-        if event.width < 620:
+        compact = event.width < 620
+        if compact == self._canvas_heading_compact:
+            return
+        self._canvas_heading_compact = compact
+        if compact:
             subtitle.pack_forget()
         elif not subtitle.winfo_manager():
             subtitle.pack(anchor=tk.W, pady=(1, 0))
 
     def _layout_system_features(self, event) -> None:
         wraplength = max(250, (event.width - 70) // 2)
+        if wraplength == self._system_features_wraplength:
+            return
+        self._system_features_wraplength = wraplength
         for label in self.system_feature_descriptions:
             label.configure(wraplength=wraplength)
 
@@ -3829,7 +3978,6 @@ class CaptionApp:
     def _register_combobox_theme(self, combobox: ttk.Combobox) -> None:
         if combobox not in self._bound_comboboxes:
             for sequence in (
-                "<Map>",
                 "<ButtonPress-1>",
                 "<KeyPress-F4>",
                 "<Alt-Down>",
@@ -3890,6 +4038,10 @@ class CaptionApp:
         field_background = (
             palette["input_readonly"] if readonly else palette["input_bg"]
         )
+        if not register and self._text_widget_matches_palette(
+            widget, field_background, palette
+        ):
+            return
         try:
             original_state = str(widget.cget("state"))
         except tk.TclError:
@@ -3960,16 +4112,57 @@ class CaptionApp:
         except tk.TclError:
             pass
 
+    @staticmethod
+    def _text_widget_matches_palette(
+        widget: tk.Text,
+        field_background: str,
+        palette: dict,
+    ) -> bool:
+        expected = {
+            "background": field_background,
+            "foreground": palette["text"],
+            "insertbackground": palette["text"],
+            "selectbackground": palette["selection"],
+            "selectforeground": palette["text"],
+            "highlightbackground": palette["input_border"],
+            "highlightcolor": palette["input_focus"],
+        }
+        try:
+            if any(
+                str(widget.cget(option)).casefold() != str(value).casefold()
+                for option, value in expected.items()
+            ):
+                return False
+            frame = getattr(widget, "frame", None)
+            if frame is not None and (
+                str(frame.cget("background")).casefold()
+                != str(field_background).casefold()
+            ):
+                return False
+        except tk.TclError:
+            return False
+        return True
+
     def _schedule_text_widget_sync(self, widget: tk.Text) -> None:
-        if self.closing:
+        if self.closing or self._window_suspended:
+            return
+        if widget in self._text_sync_after_ids:
             return
 
         def refresh() -> None:
-            self._theme_sync_after_ids.discard(after_id)
+            self._text_sync_after_ids.pop(widget, None)
             self._refresh_themed_text_widget(widget)
 
         after_id = self.root.after_idle(refresh)
-        self._theme_sync_after_ids.add(after_id)
+        self._text_sync_after_ids[widget] = after_id
+
+    def _cancel_text_sync_jobs(self) -> None:
+        for after_id in tuple(self._text_sync_after_ids.values()):
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._text_sync_after_ids.clear()
 
     def _refresh_themed_text_widget(self, widget: tk.Text) -> None:
         if self.closing:
@@ -4022,6 +4215,7 @@ class CaptionApp:
     def _schedule_theme_sync(self) -> None:
         if self.closing:
             return
+        self._cancel_theme_sync_jobs()
 
         def schedule(delay: int | None) -> None:
             after_id = None
@@ -4042,6 +4236,14 @@ class CaptionApp:
         # pass. Verify the active palette both immediately and after mapping.
         for delay in (None, 20, 80, 220, 650):
             schedule(delay)
+
+    def _cancel_theme_sync_jobs(self) -> None:
+        for after_id in tuple(self._theme_sync_after_ids):
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._theme_sync_after_ids.clear()
 
     def _set_stage(self, active: int) -> None:
         for index, label in enumerate(self.stage_labels, start=1):
@@ -6756,6 +6958,18 @@ class CaptionApp:
         self._display_selection()
 
     def _preview_resized(self, _event=None) -> None:
+        if self.closing or self._window_suspended or len(self.selected_paths) != 1:
+            return
+        if _event is not None and (
+            int(getattr(_event, "width", 0)) <= 1
+            or int(getattr(_event, "height", 0)) <= 1
+        ):
+            return
+        try:
+            if str(self.root.state()) in {"iconic", "withdrawn"}:
+                return
+        except tk.TclError:
+            return
         if self._preview_resize_after is not None:
             try:
                 self.root.after_cancel(self._preview_resize_after)
@@ -6776,18 +6990,35 @@ class CaptionApp:
         }:
             return
         try:
-            preview = open_image(path)
+            stat = path.stat()
+            source_key = (str(path), stat.st_mtime_ns, stat.st_size)
             max_width = max(120, self.preview_label.winfo_width() - 24)
             max_height = max(100, self.preview_label.winfo_height() - 24)
+            render_key = (*source_key, max_width, max_height)
+            if render_key == self._preview_render_key and self.preview_image is not None:
+                return
+            if source_key != self._preview_source_key or self._preview_source_image is None:
+                source = open_image(path)
+                try:
+                    source_copy = source.copy()
+                finally:
+                    source.close()
+                if self._preview_source_image is not None:
+                    self._preview_source_image.close()
+                self._preview_source_image = source_copy
+                self._preview_source_key = source_key
+            preview = self._preview_source_image.copy()
             preview.thumbnail(
                 (max_width, max_height), Image.Resampling.LANCZOS
             )
             self.preview_image = ImageTk.PhotoImage(preview.copy())
             preview.close()
+            self._preview_render_key = render_key
             self.preview_label.config(image=self.preview_image, text="")
         except (OSError, RuntimeError, ValueError) as error:
             self.preview_label.config(image="", text=f"预览失败\n{error}")
             self.preview_image = None
+            self._preview_render_key = None
 
     def _display_selection(self) -> None:
         self.result_text.delete("1.0", tk.END)
@@ -7002,23 +7233,24 @@ class CaptionApp:
             self.update_after_id,
             self._preview_resize_after,
             self._result_feedback_after_id,
+            self._window_resume_after_id,
         ):
             if after_id is not None:
                 try:
                     self.root.after_cancel(after_id)
                 except tk.TclError:
                     pass
-        for after_id in tuple(self._theme_sync_after_ids):
-            try:
-                self.root.after_cancel(after_id)
-            except tk.TclError:
-                pass
-        self._theme_sync_after_ids.clear()
+        self._cancel_theme_sync_jobs()
+        self._cancel_text_sync_jobs()
         self.events_after_id = None
         self.sash_after_id = None
         self.splash_after_id = None
         self._preview_resize_after = None
         self._result_feedback_after_id = None
+        self._window_resume_after_id = None
+        if self._preview_source_image is not None:
+            self._preview_source_image.close()
+            self._preview_source_image = None
         self.root.destroy()
 
 
