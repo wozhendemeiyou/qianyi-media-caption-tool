@@ -172,6 +172,7 @@ class GuiTests(unittest.TestCase):
                 app.folder_var.set(str(root_path))
                 app.backend_var.set("local")
                 app.local_model_var.set(str(model_folder))
+                app.concurrency_var.set(4)
                 app.enable_mtp_var.set(True)
                 app.remove_thinking_tags_var.set(False)
                 app._backend_changed()
@@ -184,11 +185,186 @@ class GuiTests(unittest.TestCase):
                 self.assertTrue(finished.is_set())
                 self.assertEqual("local", captured["backend"])
                 self.assertEqual(str(model_folder), captured["local_model_folder"])
-                self.assertEqual(1, captured["concurrency"])
+                self.assertEqual("huggingface", captured["local_runtime"])
+                self.assertEqual(4, captured["concurrency"])
+                self.assertEqual("normal", str(app.concurrency_box.cget("state")))
                 self.assertEqual("", captured["api_key"])
                 self.assertTrue(captured["enable_mtp"])
                 self.assertFalse(captured["remove_thinking_tags"])
             finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_lmstudio_local_backend_does_not_require_huggingface_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            image_path = root_path / "image.jpg"
+            Image.new("RGB", (32, 32), "white").save(image_path)
+            captured = {}
+            finished = threading.Event()
+
+            class FakeRunner:
+                def __init__(self, callback):
+                    self.running = False
+
+                def run(self, **kwargs):
+                    captured.update(kwargs)
+                    finished.set()
+
+                def cancel(self):
+                    pass
+
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, self._store(root_path), show_splash=False)
+            try:
+                app._set_system_prompt("单元测试系统提示词")
+                app.folder_var.set(str(root_path))
+                app.backend_var.set("local")
+                app.local_runtime_var.set("lmstudio")
+                app.local_model_var.set("")
+                app.lmstudio_base_url_var.set("http://localhost:1234/v1")
+                app.lmstudio_model_var.set("qwen-vl-local")
+                app.concurrency_var.set(3)
+                app._backend_changed()
+                with mock.patch.object(gui, "BatchRunner", FakeRunner):
+                    app.start_task([image_path], force=True)
+                    deadline = time.monotonic() + 2
+                    while not finished.is_set() and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+
+                self.assertTrue(finished.is_set())
+                self.assertEqual("local", captured["backend"])
+                self.assertEqual("lmstudio", captured["local_runtime"])
+                self.assertEqual(
+                    "http://localhost:1234/v1",
+                    captured["lmstudio_base_url"],
+                )
+                self.assertEqual("qwen-vl-local", captured["lmstudio_model"])
+                self.assertEqual(3, captured["concurrency"])
+                self.assertEqual("", captured["api_key"])
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_lmstudio_platform_refresh_load_and_unload_cycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(
+                root, self._store(Path(directory)), show_splash=False
+            )
+            dialog = None
+            loaded_instances = []
+
+            def inventory(_endpoint):
+                return [{
+                    "key": "qwen-vl-local",
+                    "display_name": "Qwen VL Local",
+                    "format": "gguf",
+                    "vision": True,
+                    "loaded_instances": list(loaded_instances),
+                }]
+
+            def load_model(_endpoint, model_key):
+                self.assertEqual("qwen-vl-local", model_key)
+                loaded_instances[:] = ["qwen-vl-instance"]
+                return {"instance_id": "qwen-vl-instance", "status": "loaded"}
+
+            def unload_model(_endpoint, instance_id):
+                self.assertEqual("qwen-vl-instance", instance_id)
+                loaded_instances.clear()
+                return {"instance_id": instance_id, "status": "unloaded"}
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    root.update()
+                    if predicate():
+                        return True
+                    time.sleep(0.01)
+                return False
+
+            try:
+                dialog = app.open_platform_config()
+                radios = [
+                    widget for widget in descendants(dialog)
+                    if isinstance(widget, ttk.Radiobutton)
+                ]
+                next(
+                    widget for widget in radios
+                    if widget.cget("text") == "本地模型"
+                ).invoke()
+                dialog.qianyi_local_runtime_box.set("LM Studio 本地服务")
+                dialog.qianyi_local_runtime_box.event_generate(
+                    "<<ComboboxSelected>>"
+                )
+                root.update()
+
+                with mock.patch.object(gui, "list_lmstudio_models", inventory):
+                    dialog.qianyi_lmstudio_discover_button.invoke()
+                    self.assertTrue(wait_for(
+                        lambda: "连接正常" in dialog.qianyi_lmstudio_state_var.get()
+                    ))
+                    self.assertEqual(
+                        ("qwen-vl-local",),
+                        tuple(dialog.qianyi_lmstudio_model_box.cget("values")),
+                    )
+                    self.assertEqual(
+                        "readonly",
+                        str(dialog.qianyi_lmstudio_model_box.cget("state")),
+                    )
+                    self.assertEqual(
+                        "加载模型", dialog.qianyi_lmstudio_load_button.cget("text")
+                    )
+
+                    with mock.patch.object(gui, "load_lmstudio_model", load_model):
+                        dialog.qianyi_lmstudio_load_button.invoke()
+                        self.assertTrue(wait_for(
+                            lambda: "模型已加载" in dialog.qianyi_lmstudio_state_var.get()
+                        ))
+                    self.assertEqual(
+                        "卸载模型", dialog.qianyi_lmstudio_load_button.cget("text")
+                    )
+
+                    with mock.patch.object(
+                        gui, "unload_lmstudio_model", unload_model
+                    ):
+                        dialog.qianyi_lmstudio_load_button.invoke()
+                        self.assertTrue(wait_for(
+                            lambda: "模型已卸载" in dialog.qianyi_lmstudio_state_var.get()
+                        ))
+                    self.assertEqual(
+                        "加载模型", dialog.qianyi_lmstudio_load_button.cget("text")
+                    )
+
+                save_button = next(
+                    widget for widget in descendants(dialog)
+                    if isinstance(widget, ttk.Button)
+                    and widget.cget("text") == "保存设置"
+                )
+                with mock.patch.object(app, "log") as log:
+                    save_button.invoke()
+                self.assertEqual("local", app.backend_var.get())
+                self.assertEqual("lmstudio", app.local_runtime_var.get())
+                self.assertEqual("qwen-vl-local", app.lmstudio_model_var.get())
+                log.assert_called_once_with(
+                    "平台设置已保存：LM Studio / qwen-vl-local"
+                )
+                dialog = None
+            finally:
+                if dialog is not None and dialog.winfo_exists():
+                    try:
+                        dialog.grab_release()
+                    except tk.TclError:
+                        pass
+                    dialog.destroy()
                 root.update_idletasks()
                 app.close()
 
@@ -988,9 +1164,41 @@ class GuiTests(unittest.TestCase):
                     "pack", dialog.qianyi_local_concurrency_note.winfo_manager()
                 )
                 self.assertIn(
-                    "推荐并发数为 1",
+                    "建议从 1 开始",
                     dialog.qianyi_local_concurrency_note.cget("text"),
                 )
+                self.assertEqual(
+                    "readonly",
+                    str(dialog.qianyi_local_runtime_box.cget("state")),
+                )
+                dialog.qianyi_local_runtime_box.set("LM Studio 本地服务")
+                dialog.qianyi_local_runtime_box.event_generate(
+                    "<<ComboboxSelected>>"
+                )
+                dialog.update()
+                self.assertEqual("disabled", str(local_entry.cget("state")))
+                self.assertEqual(
+                    "normal",
+                    str(dialog.qianyi_lmstudio_url_entry.cget("state")),
+                )
+                self.assertEqual(
+                    "readonly",
+                    str(dialog.qianyi_lmstudio_model_box.cget("state")),
+                )
+                self.assertEqual(
+                    "disabled",
+                    str(dialog.qianyi_lmstudio_load_button.cget("state")),
+                )
+                self.assertFalse(dialog.qianyi_mtp_switch.enabled)
+                dialog.qianyi_local_runtime_box.set(
+                    "Hugging Face 本地目录"
+                )
+                dialog.qianyi_local_runtime_box.event_generate(
+                    "<<ComboboxSelected>>"
+                )
+                dialog.update()
+                self.assertEqual("normal", str(local_entry.cget("state")))
+                self.assertTrue(dialog.qianyi_mtp_switch.enabled)
                 self.assertEqual(
                     "disabled", str(dialog.qianyi_provider_button.cget("state"))
                 )
@@ -1026,7 +1234,8 @@ class GuiTests(unittest.TestCase):
                     if isinstance(widget, ttk.Button)
                     and widget.cget("text") == "保存设置"
                 )
-                save_button.invoke()
+                with mock.patch.object(app, "log") as log:
+                    save_button.invoke()
                 self.assertEqual("natural", app.caption_style_var.get())
                 self.assertEqual("zh", app.output_language_var.get())
                 self.assertEqual("local", app.backend_var.get())
@@ -1040,6 +1249,9 @@ class GuiTests(unittest.TestCase):
                 self.assertEqual(
                     "https://custom.example/v1",
                     app.settings["api_endpoints"]["custom"],
+                )
+                log.assert_called_once_with(
+                    "平台设置已保存：Hugging Face 本地模型 / Vision"
                 )
                 dialog = None
             finally:
@@ -1483,6 +1695,8 @@ class GuiTests(unittest.TestCase):
                 for combobox in (
                     dialog.qianyi_model_box,
                     dialog.qianyi_route_box,
+                    dialog.qianyi_local_runtime_box,
+                    dialog.qianyi_lmstudio_model_box,
                 ):
                     assert_popdown_palette(combobox, gui.THEMES["night"])
                 self.assertEqual(
@@ -1504,6 +1718,8 @@ class GuiTests(unittest.TestCase):
                 for combobox in (
                     dialog.qianyi_model_box,
                     dialog.qianyi_route_box,
+                    dialog.qianyi_local_runtime_box,
+                    dialog.qianyi_lmstudio_model_box,
                 ):
                     assert_popdown_palette(combobox, gui.THEMES["day"])
                 self.assertEqual(

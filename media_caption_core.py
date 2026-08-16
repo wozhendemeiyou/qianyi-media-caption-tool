@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable, Iterable, Iterator
+from urllib.parse import urlsplit, urlunsplit
 import zipfile
 
 from PIL import Image, ImageOps
@@ -89,6 +90,8 @@ RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 VIDEO_CHAT_LIMIT = 20 * 1024 * 1024
 VIDEO_UPLOAD_LIMIT = 512 * 1024 * 1024
 MAX_CONCURRENCY = 10
+LMSTUDIO_CAPTION_TOKEN_LIMIT = 256
+LMSTUDIO_READ_TIMEOUT = 600
 HEIF_DECODE_LOCK = threading.Lock()
 SEED_2_0_PLAN_END_DATE = date(2026, 8, 8)
 
@@ -638,7 +641,7 @@ class DpapiSecretStore(SecretStore):
 
 
 DEFAULT_SETTINGS = {
-    "version": 11,
+    "version": 12,
     "model_key": DEFAULT_MODEL_KEY,
     "provider_key": DEFAULT_PROVIDER_KEY,
     "api_models": {},
@@ -654,7 +657,10 @@ DEFAULT_SETTINGS = {
     "view_mode": "gallery",
     "subject_filter": "",
     "backend": "api",
+    "local_runtime": "huggingface",
     "local_model_folder": "",
+    "lmstudio_base_url": "http://localhost:1234/v1",
+    "lmstudio_model": "",
     "labeling_focus": "subject",
     "output_language": "zh",
     "trigger_word": "",
@@ -949,6 +955,146 @@ def test_provider_connection(
     }
 
 
+def lmstudio_native_url(base_url: str, path: str) -> str:
+    """Build an LM Studio native REST URL from its OpenAI-compatible base."""
+    endpoint = str(base_url or "").strip()
+    if not endpoint:
+        raise ValueError("请先填写 LM Studio Base URL")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("LM Studio Base URL 必须以 http:// 或 https:// 开头")
+    normalized_path = "/" + str(path or "").lstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, normalized_path, "", ""))
+
+
+def list_lmstudio_models(
+    base_url: str,
+    transport: "HttpTransport | None" = None,
+    timeout: float = 10.0,
+) -> list[dict[str, Any]]:
+    """Return downloaded vision-capable models and their loaded instances."""
+    response = (transport or HttpTransport()).request(
+        "GET",
+        lmstudio_native_url(base_url, "/api/v1/models"),
+        token=CancellationToken(),
+        api_key="",
+        attempts=1,
+        timeout=(5, timeout),
+        headers={
+            "Accept": "application/json",
+            "User-Agent": f"Qianyi-Media-Caption-Tool/{APP_VERSION}",
+        },
+    )
+    payload = _response_json(response, "")
+    data = payload.get("models")
+    if not isinstance(data, list):
+        raise ApiError("LM Studio 模型列表响应缺少 models 数组")
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_key = str(item.get("key") or "").strip()
+        if not model_key or model_key in seen:
+            continue
+        if str(item.get("type") or "llm").casefold() != "llm":
+            continue
+        capabilities = (
+            item.get("capabilities")
+            if isinstance(item.get("capabilities"), dict)
+            else {}
+        )
+        # Older LM Studio versions may omit capability metadata. Include those
+        # entries, but exclude models that explicitly report no vision input.
+        if capabilities.get("vision") is False:
+            continue
+        loaded_instances = []
+        raw_instances = item.get("loaded_instances")
+        if isinstance(raw_instances, list):
+            loaded_instances = [
+                str(instance.get("id") or "").strip()
+                for instance in raw_instances
+                if isinstance(instance, dict)
+                and str(instance.get("id") or "").strip()
+            ]
+        seen.add(model_key)
+        models.append({
+            "key": model_key,
+            "display_name": str(item.get("display_name") or model_key).strip(),
+            "format": str(item.get("format") or "").strip(),
+            "vision": capabilities.get("vision"),
+            "loaded_instances": loaded_instances,
+        })
+    return models
+
+
+def discover_lmstudio_models(
+    base_url: str,
+    transport: "HttpTransport | None" = None,
+    timeout: float = 10.0,
+) -> list[str]:
+    """Return selectable LM Studio model keys."""
+    return [
+        model["key"]
+        for model in list_lmstudio_models(base_url, transport, timeout)
+    ]
+
+
+def load_lmstudio_model(
+    base_url: str,
+    model_key: str,
+    transport: "HttpTransport | None" = None,
+    timeout: float = 600.0,
+) -> dict[str, str]:
+    selected = str(model_key or "").strip()
+    if not selected:
+        raise ValueError("请先选择 LM Studio 模型")
+    response = (transport or HttpTransport()).request(
+        "POST",
+        lmstudio_native_url(base_url, "/api/v1/models/load"),
+        token=CancellationToken(),
+        api_key="",
+        attempts=1,
+        timeout=(5, timeout),
+        headers={"Content-Type": "application/json"},
+        json={"model": selected},
+    )
+    payload = _response_json(response, "")
+    instance_id = str(payload.get("instance_id") or "").strip()
+    if not instance_id:
+        raise ApiError("LM Studio 加载响应缺少 instance_id")
+    return {
+        "instance_id": instance_id,
+        "status": str(payload.get("status") or "loaded").strip(),
+    }
+
+
+def unload_lmstudio_model(
+    base_url: str,
+    instance_id: str,
+    transport: "HttpTransport | None" = None,
+    timeout: float = 120.0,
+) -> dict[str, str]:
+    selected = str(instance_id or "").strip()
+    if not selected:
+        raise ValueError("LM Studio 模型实例 ID 为空")
+    response = (transport or HttpTransport()).request(
+        "POST",
+        lmstudio_native_url(base_url, "/api/v1/models/unload"),
+        token=CancellationToken(),
+        api_key="",
+        attempts=1,
+        timeout=(5, timeout),
+        headers={"Content-Type": "application/json"},
+        json={"instance_id": selected},
+    )
+    payload = _response_json(response, "")
+    return {
+        "instance_id": selected,
+        "status": str(payload.get("status") or "unloaded").strip(),
+    }
+
+
 def create_windows_update_script(
     update_executable: Path,
     installed_executable: Path,
@@ -1152,6 +1298,21 @@ class SettingsStore:
             settings["api_endpoints"]["custom"] = settings["custom_api_endpoint"]
         settings["sampling"] = normalize_sampling(settings.get("sampling"))
         settings["backend"] = settings.get("backend") if settings.get("backend") in {"api", "local"} else "api"
+        settings["local_runtime"] = (
+            settings.get("local_runtime")
+            if settings.get("local_runtime") in {"huggingface", "lmstudio"}
+            else "huggingface"
+        )
+        lmstudio_base_url = settings.get("lmstudio_base_url")
+        settings["lmstudio_base_url"] = (
+            lmstudio_base_url.strip()
+            if isinstance(lmstudio_base_url, str) and lmstudio_base_url.strip()
+            else DEFAULT_SETTINGS["lmstudio_base_url"]
+        )
+        lmstudio_model = settings.get("lmstudio_model")
+        settings["lmstudio_model"] = (
+            lmstudio_model.strip() if isinstance(lmstudio_model, str) else ""
+        )
         settings["labeling_focus"] = (
             settings.get("labeling_focus")
             if settings.get("labeling_focus") in {"subject", "style", "scene"}
@@ -1216,7 +1377,7 @@ class SettingsStore:
             "suppress_seed_2_0_shutdown_notice",
         ):
             cleaned.pop(key, None)
-        cleaned["version"] = 10
+        cleaned["version"] = DEFAULT_SETTINGS["version"]
         cleaned["theme"] = (
             cleaned.get("theme")
             if cleaned.get("theme") in {"night", "day"}
@@ -1230,6 +1391,21 @@ class SettingsStore:
         )
         cleaned["concurrency"] = bounded_int(
             cleaned.get("concurrency", 3), 3, 1, MAX_CONCURRENCY
+        )
+        cleaned["local_runtime"] = (
+            cleaned.get("local_runtime")
+            if cleaned.get("local_runtime") in {"huggingface", "lmstudio"}
+            else "huggingface"
+        )
+        lmstudio_base_url = cleaned.get("lmstudio_base_url")
+        cleaned["lmstudio_base_url"] = (
+            lmstudio_base_url.strip()
+            if isinstance(lmstudio_base_url, str) and lmstudio_base_url.strip()
+            else DEFAULT_SETTINGS["lmstudio_base_url"]
+        )
+        lmstudio_model = cleaned.get("lmstudio_model")
+        cleaned["lmstudio_model"] = (
+            lmstudio_model.strip() if isinstance(lmstudio_model, str) else ""
         )
         provider_key = str(cleaned.get("provider_key", DEFAULT_PROVIDER_KEY))
         cleaned["provider_key"] = (
@@ -2095,6 +2271,78 @@ class CaptionClient:
             pass
 
 
+class LmStudioCaptionClient(CaptionClient):
+    """Image caption client for an LM Studio OpenAI-compatible local server."""
+
+    def __init__(
+        self,
+        base_url: str,
+        model_id: str,
+        token: CancellationToken,
+        transport: HttpTransport | None = None,
+        *,
+        sampling: dict[str, Any] | None = None,
+        remove_thinking_tags: bool = True,
+    ):
+        endpoint = str(base_url or "").strip()
+        selected_model = str(model_id or "").strip()
+        if not endpoint:
+            raise ValueError("请填写 LM Studio Base URL")
+        if not endpoint.casefold().startswith(("http://", "https://")):
+            raise ValueError("LM Studio Base URL 必须以 http:// 或 https:// 开头")
+        if not selected_model:
+            raise ValueError("请选择或填写 LM Studio 模型 ID")
+        super().__init__(
+            MODELS[DEFAULT_MODEL_KEY],
+            "",
+            token,
+            transport,
+            provider_key="custom",
+            api_model=selected_model,
+            api_endpoint=endpoint,
+            sampling=sampling,
+            remove_thinking_tags=remove_thinking_tags,
+        )
+
+    def _sampling_payload(self) -> dict[str, Any]:
+        # Keep LM Studio's sampling configuration as the source of truth. A
+        # caption-specific output ceiling is still required because the
+        # OpenAI-compatible endpoint does not inherit the Chat UI's preset and
+        # some models otherwise generate indefinitely without an EOS token.
+        return {"max_tokens": LMSTUDIO_CAPTION_TOKEN_LIMIT}
+
+    def _billable_post(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        timeout=(10, LMSTUDIO_READ_TIMEOUT),
+    ) -> dict[str, Any]:
+        return super()._billable_post(url, payload, timeout=timeout)
+
+    @staticmethod
+    def _degenerate_output(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if len(compact) < 16:
+            return False
+        invalid = compact.count("?") + compact.count("�")
+        if invalid / len(compact) >= 0.5:
+            return True
+        frequencies: dict[str, int] = {}
+        for character in compact:
+            frequencies[character] = frequencies.get(character, 0) + 1
+        return max(frequencies.values(), default=0) / len(compact) >= 0.9
+
+    def caption_image(self, path: Path, prompt: str) -> str:
+        text = super().caption_image(path, prompt)
+        if self._degenerate_output(text):
+            raise RuntimeError(
+                "LM Studio 模型返回了连续重复的异常字符。请求格式和图片读取正常，"
+                "请先在 LM Studio 中用纯文本测试，并恢复默认或已验证的加载与采样参数；"
+                "若仍异常，再检查模型、Tokenizer、量化文件及配套 mmproj 的兼容性。"
+            )
+        return text
+
+
 class LocalCaptionClient:
     """Optional Hugging Face vision-language backend loaded from a local folder."""
 
@@ -2117,6 +2365,7 @@ class LocalCaptionClient:
         self.mtp_active = False
         self.remove_thinking_tags = bool(remove_thinking_tags)
         self._load_error: RuntimeError | None = None
+        self._load_lock = threading.Lock()
         if not self.model_folder.is_dir():
             raise ValueError("本地模型目录不存在")
         if not (self.model_folder / "config.json").is_file():
@@ -2149,6 +2398,14 @@ class LocalCaptionClient:
             return
         if self._load_error is not None:
             raise self._load_error
+        with self._load_lock:
+            if self.model is not None and self.processor is not None:
+                return
+            if self._load_error is not None:
+                raise self._load_error
+            self._load_model()
+
+    def _load_model(self) -> None:
         self.token.check()
         try:
             import torch
@@ -2541,6 +2798,9 @@ class BatchRunner:
         subject_filter: str = "",
         backend: str = "api",
         local_model_folder: str | Path = "",
+        local_runtime: str = "huggingface",
+        lmstudio_base_url: str = "http://localhost:1234/v1",
+        lmstudio_model: str = "",
         labeling_focus: str = "subject",
         output_language: str = "zh",
         trigger_word: str = "",
@@ -2562,16 +2822,30 @@ class BatchRunner:
         enable_mtp = bool(enable_mtp)
         remove_thinking_tags = bool(remove_thinking_tags)
         concurrency = max(1, min(MAX_CONCURRENCY, int(concurrency)))
-        if backend == "local":
-            concurrency = 1
+        local_runtime = (
+            local_runtime
+            if local_runtime in {"huggingface", "lmstudio"}
+            else "huggingface"
+        )
+        effective_mtp = bool(
+            enable_mtp and backend == "local" and local_runtime == "huggingface"
+        )
         journal = ProjectJournal(folder)
         journal.start({
             "mode": mode, "caption_style": caption_style,
             "subject_filter": subject_filter,
             "backend": backend,
-            "provider": provider.key if backend == "api" else "local",
+            "provider": (
+                provider.key
+                if backend == "api"
+                else ("lmstudio" if local_runtime == "lmstudio" else "local")
+            ),
             "model": (
-                str(Path(local_model_folder).name or local_model_folder)
+                (
+                    str(lmstudio_model).strip()
+                    if local_runtime == "lmstudio"
+                    else str(Path(local_model_folder).name or local_model_folder)
+                )
                 if backend == "local"
                 else (model.key if provider.key == DEFAULT_PROVIDER_KEY else api_model)
             ),
@@ -2579,9 +2853,23 @@ class BatchRunner:
             "output_language": output_language,
             "trigger_word": trigger_word,
             "concurrency": concurrency,
-            "sampling": sampling,
+            "sampling": (
+                {}
+                if backend == "local" and local_runtime == "lmstudio"
+                else sampling
+            ),
+            "sampling_source": (
+                "lmstudio"
+                if backend == "local" and local_runtime == "lmstudio"
+                else "application"
+            ),
+            "lmstudio_output_safety_limit": (
+                LMSTUDIO_CAPTION_TOKEN_LIMIT
+                if backend == "local" and local_runtime == "lmstudio"
+                else None
+            ),
             "video_preflight": bool(video_preflight),
-            "enable_mtp": enable_mtp,
+            "enable_mtp": effective_mtp,
             "remove_thinking_tags": remove_thinking_tags,
         })
         summary = BatchSummary()
@@ -2652,10 +2940,22 @@ class BatchRunner:
 
             lock = threading.Lock()
             if backend == "local":
-                client = LocalCaptionClient(Path(local_model_folder), self.token)
-                client.sampling = sampling
-                client.enable_mtp = enable_mtp
-                client.remove_thinking_tags = remove_thinking_tags
+                if local_runtime == "lmstudio":
+                    client = LmStudioCaptionClient(
+                        lmstudio_base_url,
+                        lmstudio_model,
+                        self.token,
+                        self.transport,
+                        sampling=sampling,
+                        remove_thinking_tags=remove_thinking_tags,
+                    )
+                else:
+                    client = LocalCaptionClient(
+                        Path(local_model_folder), self.token
+                    )
+                    client.sampling = sampling
+                    client.enable_mtp = effective_mtp
+                    client.remove_thinking_tags = remove_thinking_tags
             else:
                 client = CaptionClient(
                     model,

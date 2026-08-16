@@ -431,7 +431,11 @@ class MediaWorkerController:
             environment[WORKER_ROOTS_ENV] = json.dumps(
                 [str(path) for path in self.allowed_roots], ensure_ascii=False
             )
-            environment["PYTHONUTF8"] = "1"
+            # Keep HTTP/diagnostic text deterministic without forcing Python's
+            # site loader to decode third-party .pth files as UTF-8. Some
+            # Windows Python installations contain locale-encoded .pth files
+            # and would otherwise exit before the worker can bind its port.
+            environment["PYTHONIOENCODING"] = "utf-8"
             self.process = subprocess.Popen(
                 self._command(),
                 cwd=str(_runtime_roots()[-1]),

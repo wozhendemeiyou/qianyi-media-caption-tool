@@ -48,6 +48,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual({}, core.DEFAULT_SETTINGS["prompt_presets"])
         self.assertFalse(core.DEFAULT_SETTINGS["enable_mtp"])
         self.assertTrue(core.DEFAULT_SETTINGS["remove_thinking_tags"])
+        self.assertEqual("huggingface", core.DEFAULT_SETTINGS["local_runtime"])
+        self.assertEqual(
+            "http://localhost:1234/v1",
+            core.DEFAULT_SETTINGS["lmstudio_base_url"],
+        )
 
     def test_thinking_sections_are_removed_without_touching_final_caption(self):
         self.assertEqual(
@@ -330,6 +335,162 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("https://example.test/v1/models", calls[0][1])
         self.assertNotIn("Authorization", calls[0][2]["headers"])
+
+    def test_lmstudio_model_discovery_uses_local_models_endpoint(self):
+        calls = []
+
+        def sender(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return FakeResponse(payload={
+                "models": [
+                    {
+                        "type": "llm",
+                        "key": "qwen-vl-local",
+                        "display_name": "Qwen VL",
+                        "capabilities": {"vision": True},
+                        "loaded_instances": [{"id": "qwen-vl-local"}],
+                    },
+                    {
+                        "type": "llm",
+                        "key": "text-only-local",
+                        "capabilities": {"vision": False},
+                        "loaded_instances": [],
+                    },
+                    {
+                        "type": "llm",
+                        "key": "gemma-vision-local",
+                        "capabilities": {"vision": True},
+                        "loaded_instances": [],
+                    },
+                ]
+            })
+
+        models = core.discover_lmstudio_models(
+            "http://localhost:1234/v1",
+            core.HttpTransport(sender),
+        )
+
+        self.assertEqual(
+            ["qwen-vl-local", "gemma-vision-local"], models
+        )
+        self.assertEqual("GET", calls[0][0])
+        self.assertEqual("http://localhost:1234/api/v1/models", calls[0][1])
+        self.assertNotIn("Authorization", calls[0][2]["headers"])
+
+        inventory = core.list_lmstudio_models(
+            "http://localhost:1234/v1",
+            core.HttpTransport(sender),
+        )
+        self.assertEqual(["qwen-vl-local"], inventory[0]["loaded_instances"])
+
+    def test_lmstudio_load_and_unload_use_native_management_api(self):
+        calls = []
+
+        def sender(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if url.endswith("/load"):
+                return FakeResponse(payload={
+                    "type": "llm",
+                    "instance_id": "vision-instance-1",
+                    "status": "loaded",
+                })
+            return FakeResponse(payload={
+                "instance_id": "vision-instance-1",
+                "status": "unloaded",
+            })
+
+        transport = core.HttpTransport(sender)
+        loaded = core.load_lmstudio_model(
+            "http://localhost:1234/v1", "qwen-vl-local", transport
+        )
+        unloaded = core.unload_lmstudio_model(
+            "http://localhost:1234/v1", loaded["instance_id"], transport
+        )
+
+        self.assertEqual("vision-instance-1", loaded["instance_id"])
+        self.assertEqual("unloaded", unloaded["status"])
+        self.assertEqual(
+            "http://localhost:1234/api/v1/models/load", calls[0][1]
+        )
+        self.assertEqual({"model": "qwen-vl-local"}, calls[0][2]["json"])
+        self.assertEqual(
+            "http://localhost:1234/api/v1/models/unload", calls[1][1]
+        )
+        self.assertEqual(
+            {"instance_id": "vision-instance-1"}, calls[1][2]["json"]
+        )
+
+    def test_lmstudio_caption_uses_openai_image_request_and_cleans_thinking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+            calls = []
+
+            def sender(method, url, **kwargs):
+                calls.append((method, url, kwargs))
+                return FakeResponse(payload={
+                    "choices": [{
+                        "message": {
+                            "content": "<think>分析图片</think>\n本地标注"
+                        }
+                    }]
+                })
+
+            client = core.LmStudioCaptionClient(
+                "http://localhost:1234/v1",
+                "qwen-vl-local",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+                sampling={"max_tokens": 512, "top_k": 40, "seed": 7},
+                remove_thinking_tags=True,
+            )
+
+            self.assertEqual(
+                "本地标注", client.caption_image(image_path, "描述图片")
+            )
+            method, url, kwargs = calls[0]
+            self.assertEqual("POST", method)
+            self.assertEqual(
+                "http://localhost:1234/v1/chat/completions", url
+            )
+            self.assertNotIn("Authorization", kwargs["headers"])
+            payload = kwargs["json"]
+            self.assertEqual("qwen-vl-local", payload["model"])
+            self.assertEqual(
+                core.LMSTUDIO_CAPTION_TOKEN_LIMIT,
+                payload["max_tokens"],
+            )
+            for parameter in (
+                "temperature", "top_p", "top_k", "seed"
+            ):
+                self.assertNotIn(parameter, payload)
+            self.assertEqual(
+                (10, core.LMSTUDIO_READ_TIMEOUT), kwargs["timeout"]
+            )
+            image_url = payload["messages"][0]["content"][0]["image_url"]["url"]
+            self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
+
+    def test_lmstudio_rejects_degenerate_repeated_character_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+
+            def sender(method, url, **kwargs):
+                return FakeResponse(payload={
+                    "choices": [{
+                        "message": {"content": "?" * 64}
+                    }]
+                })
+
+            client = core.LmStudioCaptionClient(
+                "http://localhost:1234/v1",
+                "broken-local-model",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "连续重复"):
+                client.caption_image(image_path, "describe")
 
     def test_update_package_extracts_valid_executable_and_writes_updater(self):
         import zipfile
@@ -675,6 +836,58 @@ class CoreTests(unittest.TestCase):
                 core.caption_path_for(image_path).read_text(encoding="utf-8"),
             )
 
+    def test_lmstudio_backend_preserves_user_concurrency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(3):
+                Image.new("RGB", (24, 24), "white").save(
+                    root / f"image-{index}.jpg"
+                )
+
+            captured = {}
+
+            class FakeLmStudioClient:
+                def __init__(
+                    self, base_url, model_id, token, transport,
+                    *, sampling, remove_thinking_tags,
+                ):
+                    captured.update({
+                        "base_url": base_url,
+                        "model_id": model_id,
+                        "sampling": sampling,
+                        "remove_thinking_tags": remove_thinking_tags,
+                    })
+
+                def caption_image(self, path, prompt):
+                    return f"caption {path.stem}"
+
+            data_root = root / "appdata"
+            with mock.patch.object(
+                core, "LmStudioCaptionClient", FakeLmStudioClient
+            ):
+                with mock.patch.object(core, "app_data_dir", return_value=data_root):
+                    summary = core.BatchRunner(
+                        lambda kind, payload: None
+                    ).run(
+                        root,
+                        "image",
+                        "prompt",
+                        "seed-2.1-pro",
+                        "",
+                        backend="local",
+                        local_runtime="lmstudio",
+                        lmstudio_base_url="http://localhost:1234/v1",
+                        lmstudio_model="qwen-vl-local",
+                        concurrency=4,
+                    )
+
+            self.assertEqual(3, summary.success)
+            self.assertEqual("qwen-vl-local", captured["model_id"])
+            state_path = core.project_data_path(root, data_root) / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(4, state["metadata"]["concurrency"])
+            self.assertEqual("lmstudio", state["metadata"]["provider"])
+
     def test_local_backend_rejects_non_model_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "config.json"):
@@ -828,6 +1041,9 @@ class CoreTests(unittest.TestCase):
                     "user_prompt": ["not", "text"],
                     "suppress_seed_2_0_shutdown_notice": "true",
                     "theme": "neon",
+                    "local_runtime": "unknown",
+                    "lmstudio_base_url": "   ",
+                    "lmstudio_model": ["not", "text"],
                 }),
                 encoding="utf-8",
             )
@@ -844,6 +1060,11 @@ class CoreTests(unittest.TestCase):
             self.assertEqual({}, settings["prompt_presets"])
             self.assertEqual("", settings["user_prompt"])
             self.assertEqual("night", settings["theme"])
+            self.assertEqual("huggingface", settings["local_runtime"])
+            self.assertEqual(
+                "http://localhost:1234/v1", settings["lmstudio_base_url"]
+            )
+            self.assertEqual("", settings["lmstudio_model"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", settings)
 
             settings["concurrency"] = "also-invalid"
@@ -852,6 +1073,7 @@ class CoreTests(unittest.TestCase):
             persisted = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(3, persisted["concurrency"])
             self.assertEqual("night", persisted["theme"])
+            self.assertEqual(12, persisted["version"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", persisted)
 
     def test_project_summary_reports_saved_progress_and_directory_state(self):

@@ -26,6 +26,7 @@ from media_caption_core import (
     DEFAULT_MODEL_KEY,
     DEFAULT_PROVIDER_KEY,
     DEFAULT_SAMPLING,
+    LMSTUDIO_CAPTION_TOKEN_LIMIT,
     MAX_CONCURRENCY,
     MODELS,
     ScanResult,
@@ -45,12 +46,15 @@ from media_caption_core import (
     load_project_summary,
     load_incomplete_paths,
     launch_windows_update_installer,
+    list_lmstudio_models,
+    load_lmstudio_model,
     maybe_create_automatic_backup,
     normalize_sampling,
     open_image,
     prepend_trigger_word,
     scan_media,
     test_provider_connection,
+    unload_lmstudio_model,
     write_caption,
 )
 from media_caption_worker import run_worker_cli
@@ -80,7 +84,11 @@ RELEASE_NOTES = (
     "新增自定义 OpenAI 兼容 Base URL、模型 ID 与 API Key 配置",
     "内置供应商仅显示 API Key，自定义接口按需展开 Base URL",
     "供应商改为带品牌图标的下拉菜单，API 与本地模型互斥置灰",
-    "精简平台设置，并提示本地模型使用单并发以控制显存占用",
+    "本地模型并发改为用户可选，并持续提示显存与内存占用风险",
+    "新增 LM Studio 本地服务模式，可读取已加载模型并直接进行图片反推",
+    "LM Studio 模型改为只读下拉选择，并支持一键加载与卸载",
+    "LM Studio 采样参数由服务端接管，工作台仅附加输出安全上限",
+    "LM Studio 慢模型支持 600 秒读取，并拦截连续重复字符等退化输出",
     "自动更新开关迁移到系统说明，更正豆包 Seed 2.1 Turbo 名称",
     "MiniMax M3 已并入火山引擎 Coding Plan",
     "新增按需媒体 Worker、视频预检、自动备份与隐私脱敏诊断包",
@@ -127,6 +135,13 @@ FOCUS_OPTIONS = {
     "风景 / 场景": "scene",
 }
 FOCUS_LABELS = {value: label for label, value in FOCUS_OPTIONS.items()}
+LOCAL_RUNTIME_OPTIONS = {
+    "Hugging Face 本地目录": "huggingface",
+    "LM Studio 本地服务": "lmstudio",
+}
+LOCAL_RUNTIME_LABELS = {
+    value: label for label, value in LOCAL_RUNTIME_OPTIONS.items()
+}
 PROVIDER_LABELS = {provider.label: key for key, provider in API_PROVIDERS.items()}
 # Public platform options include maintained built-in routes plus an explicit
 # OpenAI-compatible custom route whose endpoint and model are entered locally.
@@ -2236,6 +2251,11 @@ class CaptionApp:
         self.focus_label_var = tk.StringVar(value="训练主体")
         self.trigger_word_var = tk.StringVar()
         self.local_model_var = tk.StringVar()
+        self.local_runtime_var = tk.StringVar(value="huggingface")
+        self.lmstudio_base_url_var = tk.StringVar(
+            value="http://localhost:1234/v1"
+        )
+        self.lmstudio_model_var = tk.StringVar()
         self.enable_mtp_var = tk.BooleanVar(value=False)
         self.remove_thinking_tags_var = tk.BooleanVar(value=True)
 
@@ -4095,7 +4115,14 @@ class CaptionApp:
         self.view_mode_var.set(self.settings.get("view_mode", "gallery"))
         self.subject_filter_var.set(self.settings.get("subject_filter", ""))
         self.backend_var.set(self.settings.get("backend", "api"))
+        self.local_runtime_var.set(
+            self.settings.get("local_runtime", "huggingface")
+        )
         self.local_model_var.set(self.settings.get("local_model_folder", ""))
+        self.lmstudio_base_url_var.set(
+            self.settings.get("lmstudio_base_url", "http://localhost:1234/v1")
+        )
+        self.lmstudio_model_var.set(self.settings.get("lmstudio_model", ""))
         focus = self.settings.get("labeling_focus", "subject")
         self.focus_label_var.set(FOCUS_LABELS.get(focus, "训练主体"))
         self.output_language_var.set(self.settings.get("output_language", "zh"))
@@ -4137,6 +4164,19 @@ class CaptionApp:
         if self._provider_key() == DEFAULT_PROVIDER_KEY:
             return MODELS[self._model_key()].model_id
         return self.model_label_var.get().strip()
+
+    def _platform_log_summary(self) -> str:
+        """Describe the backend that was actually saved, not the dormant API fields."""
+        if self.backend_var.get() == "local":
+            if self.local_runtime_var.get() == "lmstudio":
+                model = self.lmstudio_model_var.get().strip() or "未选择模型"
+                return f"LM Studio / {model}"
+            folder = self.local_model_var.get().strip()
+            model = Path(folder).name if folder else "未选择模型目录"
+            return f"Hugging Face 本地模型 / {model}"
+        provider = API_PROVIDERS[self._provider_key()]
+        model = self._api_model() or "未选择模型"
+        return f"{provider.label} / {model}"
 
     def _default_endpoint(self, provider_key: str) -> str:
         provider = API_PROVIDERS[provider_key]
@@ -4283,10 +4323,19 @@ class CaptionApp:
         self._set_sampling_values(DEFAULT_SAMPLING)
 
     def _update_platform_status(self) -> None:
-        provider = API_PROVIDERS[self._provider_key()]
-        model = self._api_model() or "未选择模型"
         mode = "视频反推" if self.media_mode_var.get() == "video" else "图像打标"
-        self.platform_status_var.set(f"{mode}  |  {provider.label} · {model}")
+        if self.backend_var.get() == "local":
+            if self.local_runtime_var.get() == "lmstudio":
+                model = self.lmstudio_model_var.get().strip() or "未选择模型"
+                platform = f"LM Studio · {model}"
+            else:
+                folder = self.local_model_var.get().strip()
+                platform = f"Hugging Face · {Path(folder).name if folder else '未选择目录'}"
+        else:
+            provider = API_PROVIDERS[self._provider_key()]
+            model = self._api_model() or "未选择模型"
+            platform = f"{provider.label} · {model}"
+        self.platform_status_var.set(f"{mode}  |  {platform}")
 
     def _set_nav_active(self, key: str) -> None:
         for name, button in self.nav_buttons.items():
@@ -4323,6 +4372,8 @@ class CaptionApp:
 
     def _backend_changed(self) -> None:
         is_local = self.backend_var.get() == "local"
+        is_huggingface = self.local_runtime_var.get() == "huggingface"
+        is_lmstudio = is_local and not is_huggingface
         self.provider_box.configure(state=tk.DISABLED if is_local else "readonly")
         if is_local:
             self.model_box.configure(state=tk.DISABLED)
@@ -4334,9 +4385,13 @@ class CaptionApp:
                     else "readonly"
                 )
             )
-        self.concurrency_box.configure(state=tk.DISABLED if is_local else tk.NORMAL)
-        self.local_model_entry.configure(state=tk.NORMAL if is_local else tk.DISABLED)
-        self.local_model_button.configure(state=tk.NORMAL if is_local else tk.DISABLED)
+        self.concurrency_box.configure(state=tk.NORMAL)
+        self.local_model_entry.configure(
+            state=tk.NORMAL if is_local and is_huggingface else tk.DISABLED
+        )
+        self.local_model_button.configure(
+            state=tk.NORMAL if is_local and is_huggingface else tk.DISABLED
+        )
         self.endpoint_box.configure(
             state=(
                 tk.NORMAL
@@ -4345,10 +4400,39 @@ class CaptionApp:
             )
         )
         if is_local:
-            self.concurrency_var.set(1)
             self.billing_var.set("本地 / 不计费")
         else:
             self._model_changed()
+        sampling_state = tk.DISABLED if is_lmstudio else tk.NORMAL
+        self.sampling_preset_box.configure(
+            state=tk.DISABLED if is_lmstudio else "readonly"
+        )
+        self.sampling_reset_button.configure(state=sampling_state)
+        for control in self.sampling_control_widgets.values():
+            control.configure(state=sampling_state)
+        if is_lmstudio:
+            self.sampling_support_var.set(
+                "LM Studio 使用服务端采样设置；工作台仅附加 "
+                f"{LMSTUDIO_CAPTION_TOKEN_LIMIT} token 输出安全上限"
+            )
+        elif is_local:
+            self.sampling_support_var.set(
+                "Hugging Face 本地模式使用工作台采样参数"
+            )
+        else:
+            provider = API_PROVIDERS[self._provider_key()]
+            supported = [
+                name
+                for name in (
+                    "max_tokens", "temperature", "top_p", "top_k",
+                    "frequency_penalty", "presence_penalty", "seed",
+                )
+                if name in provider.supported_parameters
+            ]
+            self.sampling_support_var.set(
+                "当前平台发送参数：" + " · ".join(supported)
+            )
+        self._update_platform_status()
 
     def browse_local_model(self) -> None:
         selected = filedialog.askdirectory(
@@ -4612,6 +4696,15 @@ class CaptionApp:
         language_var = tk.StringVar(value=self.output_language_var.get())
         backend_var = tk.StringVar(value=self.backend_var.get())
         local_model_var = tk.StringVar(value=self.local_model_var.get())
+        local_runtime_label_var = tk.StringVar(
+            value=LOCAL_RUNTIME_LABELS.get(
+                self.local_runtime_var.get(), "Hugging Face 本地目录"
+            )
+        )
+        lmstudio_base_url_var = tk.StringVar(
+            value=self.lmstudio_base_url_var.get()
+        )
+        lmstudio_model_var = tk.StringVar(value=self.lmstudio_model_var.get())
 
         backend_heading = self._semantic_heading(
             frame, "◫", "运行后端与模型", "yellow", "API / LOCAL MODEL"
@@ -4640,18 +4733,34 @@ class CaptionApp:
         ).pack(side=tk.LEFT, padx=(16, 0))
         local_concurrency_note = ttk.Label(
             backend_controls,
-            text="⚠ 并发越高显存占用越大；本地模型推荐并发数为 1",
+            text="⚠ 并发越高，显存与内存占用越大；建议从 1 开始，确认资源充足后再提高",
             style="SurfaceMuted.TLabel",
         )
 
         ttk.Label(
-            backend_frame, text="本地模型目录", style="Surface.TLabel"
+            backend_frame, text="本地运行方式", style="Surface.TLabel"
         ).grid(row=1, column=0, sticky=tk.W, pady=(11, 0))
+        local_runtime_box = ttk.Combobox(
+            backend_frame,
+            textvariable=local_runtime_label_var,
+            state="readonly",
+            values=list(LOCAL_RUNTIME_OPTIONS),
+            width=42,
+        )
+        local_runtime_box.grid(
+            row=1, column=1, columnspan=2, sticky=tk.EW,
+            padx=(12, 0), pady=(11, 0),
+        )
+
+        local_model_label = ttk.Label(
+            backend_frame, text="本地模型目录", style="Surface.TLabel"
+        )
+        local_model_label.grid(row=2, column=0, sticky=tk.W, pady=(11, 0))
         local_model_entry = ttk.Entry(
             backend_frame, textvariable=local_model_var, width=42
         )
         local_model_entry.grid(
-            row=1, column=1, sticky=tk.EW, padx=(12, 8), pady=(11, 0)
+            row=2, column=1, sticky=tk.EW, padx=(12, 8), pady=(11, 0)
         )
 
         def browse_draft_local_model() -> None:
@@ -4666,7 +4775,64 @@ class CaptionApp:
         local_model_button = ttk.Button(
             backend_frame, text="选择", command=browse_draft_local_model
         )
-        local_model_button.grid(row=1, column=2, sticky=tk.E, pady=(11, 0))
+        local_model_button.grid(row=2, column=2, sticky=tk.E, pady=(11, 0))
+
+        lmstudio_url_label = ttk.Label(
+            backend_frame, text="LM Studio URL", style="Surface.TLabel"
+        )
+        lmstudio_url_label.grid(row=3, column=0, sticky=tk.W, pady=(11, 0))
+        lmstudio_url_entry = ttk.Entry(
+            backend_frame, textvariable=lmstudio_base_url_var, width=42
+        )
+        lmstudio_url_entry.grid(
+            row=3, column=1, columnspan=2, sticky=tk.EW,
+            padx=(12, 0), pady=(11, 0),
+        )
+
+        lmstudio_model_label = ttk.Label(
+            backend_frame, text="LM Studio 模型", style="Surface.TLabel"
+        )
+        lmstudio_model_label.grid(row=4, column=0, sticky=tk.W, pady=(11, 0))
+        lmstudio_model_box = ttk.Combobox(
+            backend_frame,
+            textvariable=lmstudio_model_var,
+            state="readonly",
+            values=(
+                (lmstudio_model_var.get().strip(),)
+                if lmstudio_model_var.get().strip()
+                else ()
+            ),
+            width=42,
+        )
+        lmstudio_model_box.grid(
+            row=4, column=1, sticky=tk.EW, padx=(12, 8), pady=(11, 0)
+        )
+        lmstudio_actions = ttk.Frame(
+            backend_frame, style="Surface.TFrame"
+        )
+        lmstudio_actions.grid(
+            row=4, column=2, sticky=tk.E, pady=(11, 0)
+        )
+        lmstudio_discover_button = ttk.Button(
+            lmstudio_actions, text="刷新列表", width=10
+        )
+        lmstudio_discover_button.pack(side=tk.LEFT)
+        lmstudio_load_button = ttk.Button(
+            lmstudio_actions, text="加载模型", width=10
+        )
+        lmstudio_load_button.pack(side=tk.LEFT, padx=(6, 0))
+        lmstudio_state_var = tk.StringVar(
+            value="启动 LM Studio 本地服务器后刷新列表；仅显示视觉模型"
+        )
+        lmstudio_state_label = ttk.Label(
+            backend_frame,
+            textvariable=lmstudio_state_var,
+            style="SurfaceMuted.TLabel",
+        )
+        lmstudio_state_label.grid(
+            row=5, column=1, columnspan=2, sticky=tk.W,
+            padx=(12, 0), pady=(6, 0),
+        )
 
         ttk.Separator(frame).grid(
             row=5, column=0, columnspan=3, sticky=tk.EW, pady=(14, 0)
@@ -4837,8 +5003,14 @@ class CaptionApp:
         dialog.qianyi_route_label = route_label
         dialog.qianyi_route_box = route_box
         dialog.qianyi_route_note_var = route_note_var
+        dialog.qianyi_local_runtime_box = local_runtime_box
         dialog.qianyi_local_model_entry = local_model_entry
         dialog.qianyi_local_concurrency_note = local_concurrency_note
+        dialog.qianyi_lmstudio_url_entry = lmstudio_url_entry
+        dialog.qianyi_lmstudio_model_box = lmstudio_model_box
+        dialog.qianyi_lmstudio_discover_button = lmstudio_discover_button
+        dialog.qianyi_lmstudio_load_button = lmstudio_load_button
+        dialog.qianyi_lmstudio_state_var = lmstudio_state_var
         dialog.qianyi_api_key_entry = entry
         dialog.qianyi_mtp_switch = mtp_switch
         dialog.qianyi_thinking_switch = thinking_switch
@@ -4859,6 +5031,8 @@ class CaptionApp:
             "draft_keys": {},
             "selected_models": selected_models,
             "selected_endpoints": selected_endpoints,
+            "lmstudio_models": {},
+            "lmstudio_busy": False,
             "layout_ready": False,
         }
 
@@ -5070,14 +5244,228 @@ class CaptionApp:
                 target=worker, daemon=True, name=f"provider-test-{provider_key}"
             ).start()
 
+        def lmstudio_selected_info() -> dict:
+            selected = lmstudio_model_var.get().strip()
+            info = state["lmstudio_models"].get(selected)
+            return info if isinstance(info, dict) else {}
+
+        def sync_lmstudio_action_button() -> None:
+            is_lmstudio = (
+                backend_var.get() == "local"
+                and LOCAL_RUNTIME_OPTIONS.get(local_runtime_label_var.get())
+                == "lmstudio"
+            )
+            if state["lmstudio_busy"] or not is_lmstudio:
+                lmstudio_load_button.configure(state=tk.DISABLED)
+                return
+            selected = lmstudio_model_var.get().strip()
+            loaded_instances = lmstudio_selected_info().get(
+                "loaded_instances", []
+            )
+            lmstudio_load_button.configure(
+                text="卸载模型" if loaded_instances else "加载模型",
+                state=tk.NORMAL if selected else tk.DISABLED,
+            )
+
+        def apply_lmstudio_result(payload: dict) -> None:
+            if not dialog.winfo_exists():
+                return
+            state["lmstudio_busy"] = False
+            lmstudio_discover_button.configure(text="刷新列表")
+            if payload.get("ok"):
+                inventory = list(payload.get("inventory") or [])
+                state["lmstudio_models"] = {
+                    str(model.get("key") or ""): model
+                    for model in inventory
+                    if isinstance(model, dict) and model.get("key")
+                }
+                model_keys = list(state["lmstudio_models"])
+                selected = lmstudio_model_var.get().strip()
+                if selected not in model_keys:
+                    selected = model_keys[0] if model_keys else ""
+                    lmstudio_model_var.set(selected)
+                lmstudio_model_box.configure(values=model_keys)
+                action = str(payload.get("action") or "refresh")
+                if action == "load":
+                    instance_id = str(payload.get("instance_id") or "")
+                    info = state["lmstudio_models"].get(selected)
+                    if info is not None and instance_id:
+                        instances = list(info.get("loaded_instances") or [])
+                        if instance_id not in instances:
+                            instances.append(instance_id)
+                        info["loaded_instances"] = instances
+                    lmstudio_state_var.set(
+                        f"●  模型已加载 · {selected}"
+                    )
+                elif action == "unload":
+                    lmstudio_state_var.set(
+                        f"●  模型已卸载 · {selected}"
+                    )
+                elif model_keys:
+                    loaded_count = sum(
+                        bool(model.get("loaded_instances"))
+                        for model in state["lmstudio_models"].values()
+                    )
+                    lmstudio_state_var.set(
+                        f"●  连接正常 · {len(model_keys)} 个视觉模型"
+                        f" · {loaded_count} 个已加载"
+                    )
+                else:
+                    lmstudio_state_var.set(
+                        "●  连接正常，但未发现支持图片输入的模型"
+                    )
+                lmstudio_state_label.configure(
+                    style=(
+                        "StatusSuccess.TLabel"
+                        if model_keys else "StatusPending.TLabel"
+                    )
+                )
+            else:
+                error = str(payload.get("error") or "连接失败")
+                summary = error.replace("\n", " ")[:54]
+                lmstudio_state_var.set(f"●  操作失败 · {summary}")
+                lmstudio_state_label.configure(style="StatusError.TLabel")
+            update_backend_controls()
+            sync_lmstudio_action_button()
+
+        def validate_lmstudio_endpoint() -> str:
+            endpoint = lmstudio_base_url_var.get().strip()
+            if not endpoint:
+                raise ValueError("请先填写 LM Studio Base URL")
+            if not endpoint.casefold().startswith(("http://", "https://")):
+                raise ValueError("Base URL 必须以 http:// 或 https:// 开头")
+            return endpoint
+
+        def read_lmstudio_models() -> None:
+            try:
+                endpoint = validate_lmstudio_endpoint()
+            except ValueError as error:
+                lmstudio_state_var.set(f"●  {error}")
+                lmstudio_state_label.configure(style="StatusError.TLabel")
+                return
+            state["lmstudio_busy"] = True
+            lmstudio_discover_button.configure(state=tk.DISABLED, text="刷新中…")
+            lmstudio_load_button.configure(state=tk.DISABLED)
+            lmstudio_state_var.set("●  正在读取 LM Studio 模型列表")
+            lmstudio_state_label.configure(style="StatusPending.TLabel")
+
+            def worker() -> None:
+                try:
+                    inventory = list_lmstudio_models(endpoint)
+                    payload = {
+                        "ok": True,
+                        "action": "refresh",
+                        "inventory": inventory,
+                    }
+                except Exception as error:
+                    payload = {"ok": False, "error": str(error)}
+                self._post_event(
+                    "lmstudio_models_result",
+                    {**payload, "dialog": dialog, "apply": apply_lmstudio_result},
+                )
+
+            threading.Thread(
+                target=worker, daemon=True, name="lmstudio-model-discovery"
+            ).start()
+
+        def toggle_lmstudio_model() -> None:
+            try:
+                endpoint = validate_lmstudio_endpoint()
+            except ValueError as error:
+                lmstudio_state_var.set(f"●  {error}")
+                lmstudio_state_label.configure(style="StatusError.TLabel")
+                return
+            model_key = lmstudio_model_var.get().strip()
+            if not model_key:
+                lmstudio_state_var.set("●  请先从下拉框选择模型")
+                lmstudio_state_label.configure(style="StatusError.TLabel")
+                return
+            loaded_instances = list(
+                lmstudio_selected_info().get("loaded_instances") or []
+            )
+            action = "unload" if loaded_instances else "load"
+            state["lmstudio_busy"] = True
+            lmstudio_discover_button.configure(state=tk.DISABLED)
+            lmstudio_load_button.configure(
+                state=tk.DISABLED,
+                text="卸载中…" if action == "unload" else "加载中…",
+            )
+            lmstudio_state_var.set(
+                "●  正在卸载模型" if action == "unload" else "●  正在加载模型"
+            )
+            lmstudio_state_label.configure(style="StatusPending.TLabel")
+
+            def worker() -> None:
+                try:
+                    instance_id = ""
+                    if action == "unload":
+                        for loaded_instance in loaded_instances:
+                            unload_lmstudio_model(endpoint, loaded_instance)
+                    else:
+                        result = load_lmstudio_model(endpoint, model_key)
+                        instance_id = result["instance_id"]
+                    inventory = list_lmstudio_models(endpoint)
+                    payload = {
+                        "ok": True,
+                        "action": action,
+                        "instance_id": instance_id,
+                        "inventory": inventory,
+                    }
+                except Exception as error:
+                    payload = {
+                        "ok": False,
+                        "action": action,
+                        "error": str(error),
+                    }
+                self._post_event(
+                    "lmstudio_models_result",
+                    {**payload, "dialog": dialog, "apply": apply_lmstudio_result},
+                )
+
+            threading.Thread(
+                target=worker,
+                daemon=True,
+                name=f"lmstudio-model-{action}",
+            ).start()
+
+        lmstudio_discover_button.configure(command=read_lmstudio_models)
+        lmstudio_load_button.configure(command=toggle_lmstudio_model)
+        lmstudio_model_box.bind(
+            "<<ComboboxSelected>>", lambda _event: sync_lmstudio_action_button()
+        )
+
         def update_backend_controls() -> None:
             is_local = backend_var.get() == "local"
+            local_runtime = LOCAL_RUNTIME_OPTIONS.get(
+                local_runtime_label_var.get(), "huggingface"
+            )
+            is_huggingface = is_local and local_runtime == "huggingface"
+            is_lmstudio = is_local and local_runtime == "lmstudio"
             provider_key = state["provider_key"]
             provider = API_PROVIDERS[provider_key]
-            local_state = tk.NORMAL if is_local else tk.DISABLED
             api_state = tk.DISABLED if is_local else tk.NORMAL
-            local_model_entry.configure(state=local_state)
-            local_model_button.configure(state=local_state)
+            local_runtime_box.configure(
+                state="readonly" if is_local else tk.DISABLED
+            )
+            local_model_entry.configure(
+                state=tk.NORMAL if is_huggingface else tk.DISABLED
+            )
+            local_model_button.configure(
+                state=tk.NORMAL if is_huggingface else tk.DISABLED
+            )
+            lmstudio_url_entry.configure(
+                state=tk.NORMAL if is_lmstudio else tk.DISABLED
+            )
+            lmstudio_model_box.configure(
+                state="readonly" if is_lmstudio else tk.DISABLED
+            )
+            lmstudio_discover_button.configure(
+                state=(
+                    tk.NORMAL
+                    if is_lmstudio and not state["lmstudio_busy"]
+                    else tk.DISABLED
+                )
+            )
             provider_button.configure(state=api_state)
             if is_local:
                 if not local_concurrency_note.winfo_manager():
@@ -5100,7 +5488,7 @@ class CaptionApp:
             )
             entry.configure(state=api_state)
             connection_test_button.configure(state=api_state)
-            mtp_switch.set_enabled(is_local)
+            mtp_switch.set_enabled(is_huggingface)
             thinking_switch.set_enabled(True)
             portal_button.configure(
                 state=(
@@ -5110,6 +5498,11 @@ class CaptionApp:
                 )
             )
             resize_dialog_to_content()
+            sync_lmstudio_action_button()
+
+        local_runtime_box.bind(
+            "<<ComboboxSelected>>", lambda _event: update_backend_controls()
+        )
 
         for button in backend_controls.winfo_children():
             if isinstance(button, ttk.Radiobutton):
@@ -5178,7 +5571,17 @@ class CaptionApp:
             self.caption_style_var.set(caption_style_var.get())
             self.output_language_var.set(language_var.get())
             self.backend_var.set(backend_var.get())
+            self.local_runtime_var.set(
+                LOCAL_RUNTIME_OPTIONS.get(
+                    local_runtime_label_var.get(), "huggingface"
+                )
+            )
             self.local_model_var.set(local_model_var.get().strip())
+            self.lmstudio_base_url_var.set(
+                lmstudio_base_url_var.get().strip()
+                or "http://localhost:1234/v1"
+            )
+            self.lmstudio_model_var.set(lmstudio_model_var.get().strip())
             self.enable_mtp_var.set(bool(enable_mtp_var.get()))
             self.remove_thinking_tags_var.set(
                 bool(remove_thinking_tags_var.get())
@@ -5188,7 +5591,10 @@ class CaptionApp:
                 "caption_style": self.caption_style_var.get(),
                 "output_language": self.output_language_var.get(),
                 "backend": self.backend_var.get(),
+                "local_runtime": self.local_runtime_var.get(),
                 "local_model_folder": self.local_model_var.get(),
+                "lmstudio_base_url": self.lmstudio_base_url_var.get(),
+                "lmstudio_model": self.lmstudio_model_var.get(),
                 "enable_mtp": bool(self.enable_mtp_var.get()),
                 "remove_thinking_tags": bool(
                     self.remove_thinking_tags_var.get()
@@ -5196,7 +5602,7 @@ class CaptionApp:
             })
             self.settings_store.save(self.settings)
             close_dialog()
-            self.log(f"平台设置已保存：{provider.label} / {self._api_model()}")
+            self.log(f"平台设置已保存：{self._platform_log_summary()}")
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=8, column=0, columnspan=3, sticky=tk.E, pady=(18, 0))
@@ -5237,7 +5643,10 @@ class CaptionApp:
             "view_mode": self.view_mode_var.get(),
             "subject_filter": self.subject_filter_var.get().strip(),
             "backend": self.backend_var.get(),
+            "local_runtime": self.local_runtime_var.get(),
             "local_model_folder": self.local_model_var.get().strip(),
+            "lmstudio_base_url": self.lmstudio_base_url_var.get().strip(),
+            "lmstudio_model": self.lmstudio_model_var.get().strip(),
             "labeling_focus": FOCUS_OPTIONS.get(
                 self.focus_label_var.get(), "subject"
             ),
@@ -5316,7 +5725,6 @@ class CaptionApp:
             prompt = f"{system_prompt}\n\n## 用户要求\n{user_prompt}"
         backend = self.backend_var.get()
         if backend == "local":
-            model_folder = Path(self.local_model_var.get().strip())
             if self.media_mode_var.get() != "image":
                 messagebox.showwarning(
                     "本地模型",
@@ -5324,13 +5732,32 @@ class CaptionApp:
                     parent=self.root,
                 )
                 return None
-            if not model_folder.is_dir() or not (model_folder / "config.json").is_file():
-                messagebox.showwarning(
-                    "本地模型",
-                    "请选择包含 config.json 的 Hugging Face 视觉语言模型目录",
-                    parent=self.root,
-                )
-                return None
+            if self.local_runtime_var.get() == "lmstudio":
+                endpoint = self.lmstudio_base_url_var.get().strip()
+                model_id = self.lmstudio_model_var.get().strip()
+                if not endpoint.casefold().startswith(("http://", "https://")):
+                    messagebox.showwarning(
+                        "LM Studio",
+                        "请填写有效的 LM Studio Base URL，例如 http://localhost:1234/v1",
+                        parent=self.root,
+                    )
+                    return None
+                if not model_id:
+                    messagebox.showwarning(
+                        "LM Studio",
+                        "请在平台设置中读取并选择模型，或手动填写模型 ID",
+                        parent=self.root,
+                    )
+                    return None
+            else:
+                model_folder = Path(self.local_model_var.get().strip())
+                if not model_folder.is_dir() or not (model_folder / "config.json").is_file():
+                    messagebox.showwarning(
+                        "本地模型",
+                        "请选择包含 config.json 的 Hugging Face 视觉语言模型目录",
+                        parent=self.root,
+                    )
+                    return None
             api_key = ""
         elif not self._api_model():
             messagebox.showwarning("提示", "请填写当前平台的模型 ID", parent=self.root)
@@ -5390,6 +5817,9 @@ class CaptionApp:
         subject_filter = self.subject_filter_var.get().strip()
         backend = self.backend_var.get()
         local_model_folder = self.local_model_var.get().strip()
+        local_runtime = self.local_runtime_var.get()
+        lmstudio_base_url = self.lmstudio_base_url_var.get().strip()
+        lmstudio_model = self.lmstudio_model_var.get().strip()
         labeling_focus = FOCUS_OPTIONS.get(self.focus_label_var.get(), "subject")
         output_language = self.output_language_var.get()
         trigger_word = self.trigger_word_var.get().strip()
@@ -5407,10 +5837,21 @@ class CaptionApp:
         self._set_stage(2)
         self.progress_text_var.set("准备任务...")
         if backend == "local":
-            self.log(
-                f"开始任务：本地模型 {Path(local_model_folder).name} / 单并发 / "
-                f"MTP {'请求启用' if enable_mtp else '关闭'}"
-            )
+            if local_runtime == "lmstudio":
+                self.log(
+                    f"开始任务：LM Studio / {lmstudio_model} / "
+                    f"并发 {concurrency} / MTP 由本地服务管理"
+                )
+                self.log(
+                    "LM Studio 使用服务端采样设置 / "
+                    f"输出安全上限 {LMSTUDIO_CAPTION_TOKEN_LIMIT} tokens"
+                )
+            else:
+                self.log(
+                    f"开始任务：本地模型 {Path(local_model_folder).name} / "
+                    f"并发 {concurrency} / "
+                    f"MTP {'请求启用' if enable_mtp else '关闭'}"
+                )
         else:
             self.log(
                 f"开始任务：{provider.label} / {api_model} / "
@@ -5441,6 +5882,9 @@ class CaptionApp:
                 subject_filter=subject_filter,
                 backend=backend,
                 local_model_folder=local_model_folder,
+                local_runtime=local_runtime,
+                lmstudio_base_url=lmstudio_base_url,
+                lmstudio_model=lmstudio_model,
                 labeling_focus=labeling_focus,
                 output_language=output_language,
                 trigger_word=trigger_word,
@@ -6078,6 +6522,37 @@ class CaptionApp:
                 else:
                     error = str(payload.get("error") or "连接失败")
                     summary = error.replace("\n", " ")[:38]
+                    variable.set(f"●  连接失败 · {summary}")
+                    label.configure(style="StatusError.TLabel")
+            elif kind == "lmstudio_models_result":
+                dialog = payload.get("dialog")
+                apply_result = payload.get("apply")
+                if callable(apply_result):
+                    if dialog and dialog.winfo_exists():
+                        apply_result(payload)
+                    continue
+                button = payload.get("button")
+                label = payload.get("label")
+                variable = payload.get("variable")
+                model_box = payload.get("model_box")
+                model_variable = payload.get("model_variable")
+                if not dialog or not dialog.winfo_exists():
+                    continue
+                button.configure(state=tk.NORMAL, text="刷新列表")
+                if payload.get("ok"):
+                    models = list(payload.get("models") or [])
+                    model_box.configure(values=models)
+                    if models and not model_variable.get().strip():
+                        model_variable.set(models[0])
+                    if models:
+                        variable.set(f"●  连接正常 · 已读取 {len(models)} 个模型")
+                        label.configure(style="StatusSuccess.TLabel")
+                    else:
+                        variable.set("●  连接正常，但 LM Studio 尚未加载模型")
+                        label.configure(style="StatusPending.TLabel")
+                else:
+                    error = str(payload.get("error") or "连接失败")
+                    summary = error.replace("\n", " ")[:48]
                     variable.set(f"●  连接失败 · {summary}")
                     label.configure(style="StatusError.TLabel")
             elif kind == "status":
