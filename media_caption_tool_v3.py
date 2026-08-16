@@ -27,6 +27,7 @@ from media_caption_core import (
     DEFAULT_PROVIDER_KEY,
     DEFAULT_SAMPLING,
     LMSTUDIO_CAPTION_TOKEN_LIMIT,
+    LMSTUDIO_LOAD_PROFILE_DEFAULT,
     MAX_CONCURRENCY,
     MODELS,
     ScanResult,
@@ -65,6 +66,10 @@ UI_FONT = "HarmonyOS Sans SC"
 LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
 RELEASE_NOTES = (
+    "LM Studio 新增低显存安全、纯 CPU 与沿用预设三种加载策略",
+    "修复一键加载丢失 GPU、上下文、并行和 MTP 参数导致后端崩溃",
+    "LM Studio 请求阶段真正关闭思考，并将打标输出安全上限提升至 768 tokens",
+    "优化本地图片视觉 tokens、显存不足提示与 Hugging Face 大模型设备分配",
     "彻底修复下拉弹层在日光与夜光模式切换后残留上一主题颜色",
     "统一同步全部下拉框、菜单、动态设置弹窗、文本区与开关控件",
     "为 Windows EXE 补充公司名、产品名、版本号与版权信息",
@@ -141,6 +146,14 @@ LOCAL_RUNTIME_OPTIONS = {
 }
 LOCAL_RUNTIME_LABELS = {
     value: label for label, value in LOCAL_RUNTIME_OPTIONS.items()
+}
+LMSTUDIO_LOAD_PROFILE_OPTIONS = {
+    "低显存安全（推荐）": "low_vram",
+    "纯 CPU（最稳定）": "cpu",
+    "沿用 LM Studio 预设": "inherit",
+}
+LMSTUDIO_LOAD_PROFILE_LABELS = {
+    value: label for label, value in LMSTUDIO_LOAD_PROFILE_OPTIONS.items()
 }
 PROVIDER_LABELS = {provider.label: key for key, provider in API_PROVIDERS.items()}
 # Public platform options include maintained built-in routes plus an explicit
@@ -2256,6 +2269,9 @@ class CaptionApp:
             value="http://localhost:1234/v1"
         )
         self.lmstudio_model_var = tk.StringVar()
+        self.lmstudio_load_profile_var = tk.StringVar(
+            value=LMSTUDIO_LOAD_PROFILE_DEFAULT
+        )
         self.enable_mtp_var = tk.BooleanVar(value=False)
         self.remove_thinking_tags_var = tk.BooleanVar(value=True)
 
@@ -4123,6 +4139,11 @@ class CaptionApp:
             self.settings.get("lmstudio_base_url", "http://localhost:1234/v1")
         )
         self.lmstudio_model_var.set(self.settings.get("lmstudio_model", ""))
+        self.lmstudio_load_profile_var.set(
+            self.settings.get(
+                "lmstudio_load_profile", LMSTUDIO_LOAD_PROFILE_DEFAULT
+            )
+        )
         focus = self.settings.get("labeling_focus", "subject")
         self.focus_label_var.set(FOCUS_LABELS.get(focus, "训练主体"))
         self.output_language_var.set(self.settings.get("output_language", "zh"))
@@ -4705,6 +4726,12 @@ class CaptionApp:
             value=self.lmstudio_base_url_var.get()
         )
         lmstudio_model_var = tk.StringVar(value=self.lmstudio_model_var.get())
+        lmstudio_load_profile_label_var = tk.StringVar(
+            value=LMSTUDIO_LOAD_PROFILE_LABELS.get(
+                self.lmstudio_load_profile_var.get(),
+                LMSTUDIO_LOAD_PROFILE_LABELS[LMSTUDIO_LOAD_PROFILE_DEFAULT],
+            )
+        )
 
         backend_heading = self._semantic_heading(
             frame, "◫", "运行后端与模型", "yellow", "API / LOCAL MODEL"
@@ -4821,8 +4848,23 @@ class CaptionApp:
             lmstudio_actions, text="加载模型", width=10
         )
         lmstudio_load_button.pack(side=tk.LEFT, padx=(6, 0))
+        lmstudio_profile_label = ttk.Label(
+            backend_frame, text="加载策略", style="Surface.TLabel"
+        )
+        lmstudio_profile_label.grid(row=5, column=0, sticky=tk.W, pady=(11, 0))
+        lmstudio_profile_box = ttk.Combobox(
+            backend_frame,
+            textvariable=lmstudio_load_profile_label_var,
+            state="readonly",
+            values=list(LMSTUDIO_LOAD_PROFILE_OPTIONS),
+            width=42,
+        )
+        lmstudio_profile_box.grid(
+            row=5, column=1, columnspan=2, sticky=tk.EW,
+            padx=(12, 0), pady=(11, 0),
+        )
         lmstudio_state_var = tk.StringVar(
-            value="启动 LM Studio 本地服务器后刷新列表；仅显示视觉模型"
+            value="启动 LM Studio 本地服务器后刷新列表；加载策略只管理资源，采样仍由 LM Studio 控制"
         )
         lmstudio_state_label = ttk.Label(
             backend_frame,
@@ -4830,7 +4872,7 @@ class CaptionApp:
             style="SurfaceMuted.TLabel",
         )
         lmstudio_state_label.grid(
-            row=5, column=1, columnspan=2, sticky=tk.W,
+            row=6, column=1, columnspan=2, sticky=tk.W,
             padx=(12, 0), pady=(6, 0),
         )
 
@@ -5008,6 +5050,7 @@ class CaptionApp:
         dialog.qianyi_local_concurrency_note = local_concurrency_note
         dialog.qianyi_lmstudio_url_entry = lmstudio_url_entry
         dialog.qianyi_lmstudio_model_box = lmstudio_model_box
+        dialog.qianyi_lmstudio_profile_box = lmstudio_profile_box
         dialog.qianyi_lmstudio_discover_button = lmstudio_discover_button
         dialog.qianyi_lmstudio_load_button = lmstudio_load_button
         dialog.qianyi_lmstudio_state_var = lmstudio_state_var
@@ -5249,6 +5292,27 @@ class CaptionApp:
             info = state["lmstudio_models"].get(selected)
             return info if isinstance(info, dict) else {}
 
+        def lmstudio_config_summary(info: dict) -> str:
+            instances = list(info.get("loaded_instances") or [])
+            configs = info.get("loaded_configs") or {}
+            config = (
+                configs.get(instances[0], {})
+                if instances and isinstance(configs, dict)
+                else {}
+            )
+            if not isinstance(config, dict) or not config:
+                return ""
+            parts = []
+            context = config.get("context_length")
+            parallel = config.get("parallel")
+            if context:
+                parts.append(f"上下文 {context}")
+            if parallel:
+                parts.append(f"并行 {parallel}")
+            if config.get("speculative_draft_mtp") is False:
+                parts.append("MTP 关闭")
+            return " · ".join(parts)
+
         def sync_lmstudio_action_button() -> None:
             is_lmstudio = (
                 backend_var.get() == "local"
@@ -5294,8 +5358,12 @@ class CaptionApp:
                         if instance_id not in instances:
                             instances.append(instance_id)
                         info["loaded_instances"] = instances
+                    config_summary = lmstudio_config_summary(
+                        state["lmstudio_models"].get(selected, {})
+                    )
                     lmstudio_state_var.set(
                         f"●  模型已加载 · {selected}"
+                        f"{(' · ' + config_summary) if config_summary else ''}"
                     )
                 elif action == "unload":
                     lmstudio_state_var.set(
@@ -5306,9 +5374,12 @@ class CaptionApp:
                         bool(model.get("loaded_instances"))
                         for model in state["lmstudio_models"].values()
                     )
+                    selected_info = state["lmstudio_models"].get(selected, {})
+                    config_summary = lmstudio_config_summary(selected_info)
                     lmstudio_state_var.set(
                         f"●  连接正常 · {len(model_keys)} 个视觉模型"
                         f" · {loaded_count} 个已加载"
+                        f"{(' · ' + config_summary) if config_summary else ''}"
                     )
                 else:
                     lmstudio_state_var.set(
@@ -5384,6 +5455,10 @@ class CaptionApp:
                 lmstudio_selected_info().get("loaded_instances") or []
             )
             action = "unload" if loaded_instances else "load"
+            load_profile = LMSTUDIO_LOAD_PROFILE_OPTIONS.get(
+                lmstudio_load_profile_label_var.get(),
+                LMSTUDIO_LOAD_PROFILE_DEFAULT,
+            )
             state["lmstudio_busy"] = True
             lmstudio_discover_button.configure(state=tk.DISABLED)
             lmstudio_load_button.configure(
@@ -5402,7 +5477,11 @@ class CaptionApp:
                         for loaded_instance in loaded_instances:
                             unload_lmstudio_model(endpoint, loaded_instance)
                     else:
-                        result = load_lmstudio_model(endpoint, model_key)
+                        result = load_lmstudio_model(
+                            endpoint,
+                            model_key,
+                            load_profile=load_profile,
+                        )
                         instance_id = result["instance_id"]
                     inventory = list_lmstudio_models(endpoint)
                     payload = {
@@ -5457,6 +5536,9 @@ class CaptionApp:
                 state=tk.NORMAL if is_lmstudio else tk.DISABLED
             )
             lmstudio_model_box.configure(
+                state="readonly" if is_lmstudio else tk.DISABLED
+            )
+            lmstudio_profile_box.configure(
                 state="readonly" if is_lmstudio else tk.DISABLED
             )
             lmstudio_discover_button.configure(
@@ -5582,6 +5664,12 @@ class CaptionApp:
                 or "http://localhost:1234/v1"
             )
             self.lmstudio_model_var.set(lmstudio_model_var.get().strip())
+            self.lmstudio_load_profile_var.set(
+                LMSTUDIO_LOAD_PROFILE_OPTIONS.get(
+                    lmstudio_load_profile_label_var.get(),
+                    LMSTUDIO_LOAD_PROFILE_DEFAULT,
+                )
+            )
             self.enable_mtp_var.set(bool(enable_mtp_var.get()))
             self.remove_thinking_tags_var.set(
                 bool(remove_thinking_tags_var.get())
@@ -5595,6 +5683,7 @@ class CaptionApp:
                 "local_model_folder": self.local_model_var.get(),
                 "lmstudio_base_url": self.lmstudio_base_url_var.get(),
                 "lmstudio_model": self.lmstudio_model_var.get(),
+                "lmstudio_load_profile": self.lmstudio_load_profile_var.get(),
                 "enable_mtp": bool(self.enable_mtp_var.get()),
                 "remove_thinking_tags": bool(
                     self.remove_thinking_tags_var.get()
@@ -5647,6 +5736,7 @@ class CaptionApp:
             "local_model_folder": self.local_model_var.get().strip(),
             "lmstudio_base_url": self.lmstudio_base_url_var.get().strip(),
             "lmstudio_model": self.lmstudio_model_var.get().strip(),
+            "lmstudio_load_profile": self.lmstudio_load_profile_var.get(),
             "labeling_focus": FOCUS_OPTIONS.get(
                 self.focus_label_var.get(), "subject"
             ),
@@ -5838,13 +5928,18 @@ class CaptionApp:
         self.progress_text_var.set("准备任务...")
         if backend == "local":
             if local_runtime == "lmstudio":
+                profile_label = LMSTUDIO_LOAD_PROFILE_LABELS.get(
+                    self.lmstudio_load_profile_var.get(),
+                    LMSTUDIO_LOAD_PROFILE_LABELS[LMSTUDIO_LOAD_PROFILE_DEFAULT],
+                )
                 self.log(
                     f"开始任务：LM Studio / {lmstudio_model} / "
-                    f"并发 {concurrency} / MTP 由本地服务管理"
+                    f"并发 {concurrency} / {profile_label}"
                 )
                 self.log(
                     "LM Studio 使用服务端采样设置 / "
-                    f"输出安全上限 {LMSTUDIO_CAPTION_TOKEN_LIMIT} tokens"
+                    f"输出安全上限 {LMSTUDIO_CAPTION_TOKEN_LIMIT} tokens / "
+                    f"思考{'请求关闭' if remove_thinking_tags else '保留'}"
                 )
             else:
                 self.log(

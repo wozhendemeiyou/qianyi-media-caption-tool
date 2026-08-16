@@ -7,6 +7,7 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from datetime import date, datetime
+import gc
 import hashlib
 import io
 import json
@@ -38,7 +39,7 @@ from media_caption_worker import (
 
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.6.3"
+APP_VERSION = "3.6.4"
 GITHUB_REPOSITORY = "wozhendemeiyou/qianyi-media-caption-tool"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = (
@@ -90,8 +91,14 @@ RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 VIDEO_CHAT_LIMIT = 20 * 1024 * 1024
 VIDEO_UPLOAD_LIMIT = 512 * 1024 * 1024
 MAX_CONCURRENCY = 10
-LMSTUDIO_CAPTION_TOKEN_LIMIT = 256
+LMSTUDIO_CAPTION_TOKEN_LIMIT = 768
+LMSTUDIO_REASONING_TOKEN_LIMIT = 1536
 LMSTUDIO_READ_TIMEOUT = 600
+LMSTUDIO_IMAGE_MAX_DIMENSION = 1280
+LMSTUDIO_LOAD_CONTEXT_LENGTH = 8192
+LMSTUDIO_LOAD_PARALLEL = 1
+LMSTUDIO_LOAD_PROFILE_DEFAULT = "low_vram"
+LMSTUDIO_LOAD_PROFILES = frozenset({"low_vram", "cpu", "inherit"})
 HEIF_DECODE_LOCK = threading.Lock()
 SEED_2_0_PLAN_END_DATE = date(2026, 8, 8)
 
@@ -641,7 +648,7 @@ class DpapiSecretStore(SecretStore):
 
 
 DEFAULT_SETTINGS = {
-    "version": 12,
+    "version": 13,
     "model_key": DEFAULT_MODEL_KEY,
     "provider_key": DEFAULT_PROVIDER_KEY,
     "api_models": {},
@@ -661,6 +668,7 @@ DEFAULT_SETTINGS = {
     "local_model_folder": "",
     "lmstudio_base_url": "http://localhost:1234/v1",
     "lmstudio_model": "",
+    "lmstudio_load_profile": LMSTUDIO_LOAD_PROFILE_DEFAULT,
     "labeling_focus": "subject",
     "output_language": "zh",
     "trigger_word": "",
@@ -704,6 +712,15 @@ def bounded_float(value: Any, default: float, minimum: float, maximum: float) ->
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def normalize_lmstudio_load_profile(value: Any) -> str:
+    profile = str(value or "").strip().casefold()
+    return (
+        profile
+        if profile in LMSTUDIO_LOAD_PROFILES
+        else LMSTUDIO_LOAD_PROFILE_DEFAULT
+    )
 
 
 def normalize_sampling(value: Any) -> dict[str, Any]:
@@ -967,6 +984,62 @@ def lmstudio_native_url(base_url: str, path: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, normalized_path, "", ""))
 
 
+def is_local_lmstudio_endpoint(base_url: str) -> bool:
+    parsed = urlsplit(str(base_url or "").strip())
+    host = (parsed.hostname or "").casefold()
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} and (
+        parsed.port in {None, 1234}
+    )
+
+
+def find_lmstudio_cli() -> Path | None:
+    discovered = shutil.which("lms")
+    candidates = [
+        Path(discovered) if discovered else None,
+        Path.home() / ".lmstudio" / "bin" / ("lms.exe" if os.name == "nt" else "lms"),
+    ]
+    for candidate in candidates:
+        if candidate is not None and candidate.is_file():
+            return candidate
+    return None
+
+
+def _clean_cli_output(value: Any, limit: int = 1200) -> str:
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _is_memory_failure(value: Any) -> bool:
+    text = str(value or "").casefold()
+    return any(marker in text for marker in (
+        "outofdevicememory",
+        "out of device memory",
+        "cuda out of memory",
+        "out of memory",
+        "failed to allocate",
+        "not enough memory",
+    ))
+
+
+def _lmstudio_load_command(model_key: str, profile: str) -> list[str]:
+    command = [
+        "load",
+        model_key,
+        "--context-length",
+        str(LMSTUDIO_LOAD_CONTEXT_LENGTH),
+        "--parallel",
+        str(LMSTUDIO_LOAD_PARALLEL),
+        "--no-speculative-draft-mtp",
+        "-y",
+    ]
+    if profile == "cpu":
+        command.extend(("--gpu", "off"))
+    elif profile == "low_vram":
+        command.extend(("--gpu", "0.10"))
+    return command
+
+
 def list_lmstudio_models(
     base_url: str,
     transport: "HttpTransport | None" = None,
@@ -1009,21 +1082,32 @@ def list_lmstudio_models(
         if capabilities.get("vision") is False:
             continue
         loaded_instances = []
+        loaded_configs: dict[str, dict[str, Any]] = {}
         raw_instances = item.get("loaded_instances")
         if isinstance(raw_instances, list):
-            loaded_instances = [
-                str(instance.get("id") or "").strip()
-                for instance in raw_instances
-                if isinstance(instance, dict)
-                and str(instance.get("id") or "").strip()
-            ]
+            for instance in raw_instances:
+                if not isinstance(instance, dict):
+                    continue
+                instance_id = str(instance.get("id") or "").strip()
+                if not instance_id:
+                    continue
+                loaded_instances.append(instance_id)
+                config = instance.get("config")
+                loaded_configs[instance_id] = (
+                    dict(config) if isinstance(config, dict) else {}
+                )
+        reasoning = capabilities.get("reasoning")
         seen.add(model_key)
         models.append({
             "key": model_key,
             "display_name": str(item.get("display_name") or model_key).strip(),
             "format": str(item.get("format") or "").strip(),
             "vision": capabilities.get("vision"),
+            "reasoning": dict(reasoning) if isinstance(reasoning, dict) else {},
+            "size_bytes": bounded_int(item.get("size_bytes"), 0, 0, 2 ** 63 - 1),
+            "params_string": str(item.get("params_string") or "").strip(),
             "loaded_instances": loaded_instances,
+            "loaded_configs": loaded_configs,
         })
     return models
 
@@ -1045,10 +1129,79 @@ def load_lmstudio_model(
     model_key: str,
     transport: "HttpTransport | None" = None,
     timeout: float = 600.0,
-) -> dict[str, str]:
+    *,
+    load_profile: str = LMSTUDIO_LOAD_PROFILE_DEFAULT,
+) -> dict[str, Any]:
     selected = str(model_key or "").strip()
     if not selected:
         raise ValueError("请先选择 LM Studio 模型")
+    profile = normalize_lmstudio_load_profile(load_profile)
+    if (
+        transport is None
+        and profile != "inherit"
+        and is_local_lmstudio_endpoint(base_url)
+    ):
+        executable = find_lmstudio_cli()
+        if executable is None:
+            raise RuntimeError(
+                "未找到 LM Studio 命令行工具 lms，无法应用安全 GPU 加载策略。"
+                "请在 LM Studio 的 Developer 页面安装 CLI，或选择“沿用 LM Studio 预设”。"
+            )
+        command = [str(executable), *_lmstudio_load_command(selected, profile)]
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(30.0, float(timeout)),
+                check=False,
+                creationflags=creation_flags,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"LM Studio 模型加载超过 {int(timeout)} 秒，已停止等待"
+            ) from error
+        except OSError as error:
+            raise RuntimeError(f"无法启动 LM Studio CLI：{error}") from error
+        output = _clean_cli_output(
+            "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+        )
+        if completed.returncode != 0:
+            if _is_memory_failure(output):
+                raise RuntimeError(
+                    "LM Studio 模型加载失败：显存或内存不足。请关闭占用显存的软件，"
+                    "改用“纯 CPU（最稳定）”，或换用更小的量化模型。"
+                )
+            raise RuntimeError(f"LM Studio 模型加载失败：{output or 'lms 返回未知错误'}")
+        inventory = list_lmstudio_models(base_url, timeout=min(15.0, timeout))
+        selected_info = next(
+            (item for item in inventory if item.get("key") == selected), {}
+        )
+        instances = list(selected_info.get("loaded_instances") or [])
+        instance_id = str(instances[0] if instances else selected)
+        loaded_configs = selected_info.get("loaded_configs") or {}
+        return {
+            "instance_id": instance_id,
+            "status": "loaded",
+            "loader": "cli",
+            "profile": profile,
+            "load_config": dict(loaded_configs.get(instance_id) or {}),
+        }
+
+    request_body: dict[str, Any] = {
+        "model": selected,
+        "echo_load_config": True,
+    }
+    if profile != "inherit":
+        request_body.update({
+            "context_length": LMSTUDIO_LOAD_CONTEXT_LENGTH,
+            "eval_batch_size": 512,
+            "flash_attention": True,
+            "offload_kv_cache_to_gpu": False,
+        })
     response = (transport or HttpTransport()).request(
         "POST",
         lmstudio_native_url(base_url, "/api/v1/models/load"),
@@ -1057,7 +1210,7 @@ def load_lmstudio_model(
         attempts=1,
         timeout=(5, timeout),
         headers={"Content-Type": "application/json"},
-        json={"model": selected},
+        json=request_body,
     )
     payload = _response_json(response, "")
     instance_id = str(payload.get("instance_id") or "").strip()
@@ -1066,6 +1219,13 @@ def load_lmstudio_model(
     return {
         "instance_id": instance_id,
         "status": str(payload.get("status") or "loaded").strip(),
+        "loader": "rest",
+        "profile": profile,
+        "load_config": dict(
+            payload.get("load_config")
+            if isinstance(payload.get("load_config"), dict)
+            else {}
+        ),
     }
 
 
@@ -1313,6 +1473,9 @@ class SettingsStore:
         settings["lmstudio_model"] = (
             lmstudio_model.strip() if isinstance(lmstudio_model, str) else ""
         )
+        settings["lmstudio_load_profile"] = normalize_lmstudio_load_profile(
+            settings.get("lmstudio_load_profile")
+        )
         settings["labeling_focus"] = (
             settings.get("labeling_focus")
             if settings.get("labeling_focus") in {"subject", "style", "scene"}
@@ -1406,6 +1569,9 @@ class SettingsStore:
         lmstudio_model = cleaned.get("lmstudio_model")
         cleaned["lmstudio_model"] = (
             lmstudio_model.strip() if isinstance(lmstudio_model, str) else ""
+        )
+        cleaned["lmstudio_load_profile"] = normalize_lmstudio_load_profile(
+            cleaned.get("lmstudio_load_profile")
         )
         provider_key = str(cleaned.get("provider_key", DEFAULT_PROVIDER_KEY))
         cleaned["provider_key"] = (
@@ -1968,6 +2134,8 @@ def _chat_text(payload: dict[str, Any]) -> str:
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
         raise ApiError("接口响应缺少 choices.message.content", body=json.dumps(payload, ensure_ascii=False)[:600]) from error
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
@@ -2309,7 +2477,43 @@ class LmStudioCaptionClient(CaptionClient):
         # caption-specific output ceiling is still required because the
         # OpenAI-compatible endpoint does not inherit the Chat UI's preset and
         # some models otherwise generate indefinitely without an EOS token.
-        return {"max_tokens": LMSTUDIO_CAPTION_TOKEN_LIMIT}
+        payload: dict[str, Any] = {
+            "max_tokens": (
+                LMSTUDIO_CAPTION_TOKEN_LIMIT
+                if self.remove_thinking_tags
+                else LMSTUDIO_REASONING_TOKEN_LIMIT
+            )
+        }
+        if self.remove_thinking_tags:
+            # LM Studio exposes model reasoning independently from message
+            # content. This disables it before generation instead of merely
+            # deleting <think> blocks after the output budget is consumed.
+            payload["reasoning_effort"] = "none"
+        return payload
+
+    @staticmethod
+    def _translate_request_error(error: ApiError) -> None:
+        detail = f"{error} {error.body}".casefold()
+        if "terminated" in detail or "channel error" in detail:
+            raise RuntimeError(
+                "LM Studio 模型进程在处理图片时退出。通常是 GPU Offload、上下文或并行槽位"
+                "占用过高导致显存不足；请卸载模型后改用低显存安全或纯 CPU 策略重新加载。"
+            ) from error
+        if _is_memory_failure(detail):
+            raise RuntimeError(
+                "LM Studio 推理显存或内存不足。请降低 GPU Offload、上下文与并行数，"
+                "并关闭占用显存的软件后重试。"
+            ) from error
+        if any(marker in detail for marker in (
+            "connection refused",
+            "actively refused",
+            "failed to establish a new connection",
+            "无法连接",
+        )):
+            raise RuntimeError(
+                "无法连接 LM Studio 本地服务器。请先启动 LM Studio Server，再刷新模型列表。"
+            ) from error
+        raise error
 
     def _billable_post(
         self,
@@ -2317,7 +2521,27 @@ class LmStudioCaptionClient(CaptionClient):
         payload: dict[str, Any],
         timeout=(10, LMSTUDIO_READ_TIMEOUT),
     ) -> dict[str, Any]:
-        return super()._billable_post(url, payload, timeout=timeout)
+        try:
+            return super()._billable_post(url, payload, timeout=timeout)
+        except ApiError as error:
+            detail = f"{error} {error.body}".casefold()
+            unsupported_reasoning = (
+                error.status == 400
+                and "reasoning_effort" in payload
+                and "reasoning" in detail
+                and any(marker in detail for marker in (
+                    "unknown", "unsupported", "unrecognized", "extra", "invalid"
+                ))
+            )
+            if unsupported_reasoning:
+                fallback = dict(payload)
+                fallback.pop("reasoning_effort", None)
+                try:
+                    return super()._billable_post(url, fallback, timeout=timeout)
+                except ApiError as fallback_error:
+                    self._translate_request_error(fallback_error)
+            self._translate_request_error(error)
+        raise RuntimeError("LM Studio 请求失败")
 
     @staticmethod
     def _degenerate_output(text: str) -> bool:
@@ -2333,7 +2557,67 @@ class LmStudioCaptionClient(CaptionClient):
         return max(frequencies.values(), default=0) / len(compact) >= 0.9
 
     def caption_image(self, path: Path, prompt: str) -> str:
-        text = super().caption_image(path, prompt)
+        prepared = prepare_image(
+            path,
+            size_limit=256 * 1024,
+            max_dimension=LMSTUDIO_IMAGE_MAX_DIMENSION,
+        )
+        encoded = base64.b64encode(prepared.data).decode("ascii")
+        payload = {
+            "model": self.api_model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{prepared.mime_type};base64,{encoded}"
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        }
+        payload.update(self._sampling_payload())
+        response = self._billable_post(self._chat_url(), payload)
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else {}
+        message = choice.get("message") if isinstance(choice, dict) else {}
+        message = message if isinstance(message, dict) else {}
+        reasoning = str(
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or ""
+        ).strip()
+        text = self._clean_text(_chat_text(response))
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        details = (
+            usage.get("completion_tokens_details")
+            if isinstance(usage.get("completion_tokens_details"), dict)
+            else {}
+        )
+        reasoning_tokens = bounded_int(
+            details.get("reasoning_tokens"), 0, 0, 10_000_000
+        )
+        finish_reason = str(choice.get("finish_reason") or "").casefold()
+        if finish_reason == "length":
+            if reasoning_tokens or reasoning:
+                raise RuntimeError(
+                    "LM Studio 的输出预算被思考内容占用，正文未完整生成。"
+                    "请开启“移除思考标签”后重试；工作台会在请求阶段关闭思考。"
+                )
+            raise RuntimeError(
+                "LM Studio 输出达到安全上限，结果可能不完整，因此没有写入 TXT。"
+            )
+        if not text:
+            if reasoning_tokens or reasoning:
+                raise RuntimeError(
+                    "LM Studio 只返回了思考内容，没有生成最终标注。"
+                    "请开启“移除思考标签”后重试。"
+                )
+            raise ApiError("LM Studio 模型返回了空结果")
+        if not self.remove_thinking_tags and reasoning:
+            text = f"<think>{reasoning}</think>\n{text}"
         if self._degenerate_output(text):
             raise RuntimeError(
                 "LM Studio 模型返回了连续重复的异常字符。请求格式和图片读取正常，"
@@ -2366,6 +2650,7 @@ class LocalCaptionClient:
         self.remove_thinking_tags = bool(remove_thinking_tags)
         self._load_error: RuntimeError | None = None
         self._load_lock = threading.Lock()
+        self._generation_lock = threading.Lock()
         if not self.model_folder.is_dir():
             raise ValueError("本地模型目录不存在")
         if not (self.model_folder / "config.json").is_file():
@@ -2427,19 +2712,49 @@ class LocalCaptionClient:
             self._load_error = RuntimeError("当前 transformers 版本不支持视觉语言模型自动加载")
             raise self._load_error
         try:
+            use_cuda = bool(torch.cuda.is_available())
             self.processor = AutoProcessor.from_pretrained(
                 self.model_folder,
                 local_files_only=True,
                 trust_remote_code=True,
             )
-            self.model = model_class.from_pretrained(
-                self.model_folder,
-                local_files_only=True,
-                trust_remote_code=True,
-                torch_dtype="auto",
-            )
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.model.to(self.device)
+            load_options: dict[str, Any] = {
+                "local_files_only": True,
+                "trust_remote_code": True,
+                "torch_dtype": "auto",
+                "low_cpu_mem_usage": True,
+            }
+            if use_cuda:
+                # Let Accelerate distribute oversized models instead of first
+                # materializing the whole checkpoint in RAM and then moving it
+                # wholesale to an 8 GB-class GPU.
+                load_options["device_map"] = "auto"
+            try:
+                self.model = model_class.from_pretrained(
+                    self.model_folder,
+                    **load_options,
+                )
+            except TypeError:
+                # Older remote-code loaders may not accept low_cpu_mem_usage
+                # even when the installed Transformers version does.
+                load_options.pop("low_cpu_mem_usage", None)
+                try:
+                    self.model = model_class.from_pretrained(
+                        self.model_folder,
+                        **load_options,
+                    )
+                except TypeError:
+                    load_options.pop("device_map", None)
+                    self.model = model_class.from_pretrained(
+                        self.model_folder,
+                        **load_options,
+                    )
+                    if use_cuda:
+                        self.model.to("cuda")
+            self.device = "cuda" if use_cuda else "cpu"
+            model_device = getattr(self.model, "device", None)
+            if model_device is not None and str(model_device) != "meta":
+                self.device = model_device
             self.model.eval()
             self.torch = torch
             self.mtp_active = bool(
@@ -2448,9 +2763,35 @@ class LocalCaptionClient:
         except Exception as error:
             self.processor = None
             self.model = None
-            self._load_error = RuntimeError(f"本地视觉模型加载失败：{error}")
+            if bool(getattr(torch, "cuda", None)) and torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            if _is_memory_failure(error):
+                self._load_error = RuntimeError(
+                    "本地视觉模型加载失败：显存或内存不足。请关闭占用显存的软件、"
+                    "降低并发，或改用 LM Studio 的低显存/纯 CPU 加载策略。"
+                )
+            else:
+                self._load_error = RuntimeError(f"本地视觉模型加载失败：{error}")
             raise self._load_error from error
         self.token.check()
+
+    def close(self) -> None:
+        model = self.model
+        self.model = None
+        self.processor = None
+        torch = self.torch
+        self.torch = None
+        del model
+        gc.collect()
+        if torch is not None and bool(getattr(torch, "cuda", None)):
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     def caption_image(self, path: Path, prompt: str) -> str:
         self._ensure_loaded()
@@ -2465,11 +2806,23 @@ class LocalCaptionClient:
                         {"type": "text", "text": prompt},
                     ],
                 }]
-                rendered_prompt = self.processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
+                template_options = {
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                }
+                if self.remove_thinking_tags:
+                    template_options["enable_thinking"] = False
+                try:
+                    rendered_prompt = self.processor.apply_chat_template(
+                        messages,
+                        **template_options,
+                    )
+                except TypeError:
+                    template_options.pop("enable_thinking", None)
+                    rendered_prompt = self.processor.apply_chat_template(
+                        messages,
+                        **template_options,
+                    )
             else:
                 rendered_prompt = prompt
             inputs = self.processor(
@@ -2501,28 +2854,53 @@ class LocalCaptionClient:
             })
             if self.sampling["top_k"]:
                 generation["top_k"] = self.sampling["top_k"]
-        if self.sampling["seed"] is not None:
-            self.torch.manual_seed(self.sampling["seed"])
-        with self.torch.inference_mode():
-            try:
-                generated = self.model.generate(
-                    **inputs,
-                    **generation,
-                )
-            except (TypeError, ValueError, NotImplementedError):
-                if not self.mtp_active:
-                    raise
-                # Model/config combinations can advertise MTP before their
-                # custom generation implementation supports the flag.
-                self.mtp_active = False
-                generation.pop("use_mtp", None)
-                generated = self.model.generate(
-                    **inputs,
-                    **generation,
-                )
+        try:
+            # Most Transformers VLM implementations are not safe to call from
+            # several Python threads on one model instance. Serializing only
+            # generate() still allows file decoding and preprocessing to run
+            # concurrently without multiplying KV-cache allocations.
+            with self._generation_lock:
+                self.token.check()
+                if self.sampling["seed"] is not None:
+                    self.torch.manual_seed(self.sampling["seed"])
+                with self.torch.inference_mode():
+                    try:
+                        generated = self.model.generate(
+                            **inputs,
+                            **generation,
+                        )
+                    except (TypeError, ValueError, NotImplementedError):
+                        if not self.mtp_active:
+                            raise
+                        # Model/config combinations can advertise MTP before
+                        # their custom generation implementation supports it.
+                        self.mtp_active = False
+                        generation.pop("use_mtp", None)
+                        generated = self.model.generate(
+                            **inputs,
+                            **generation,
+                        )
+        except Exception as error:
+            if _is_memory_failure(error):
+                try:
+                    if self.torch.cuda.is_available():
+                        self.torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "本地模型推理显存不足。请降低并发或输出长度，关闭其他显存任务后重试。"
+                ) from error
+            raise
         self.token.check()
         input_ids = inputs.get("input_ids")
-        if input_ids is not None and generated.shape[-1] > input_ids.shape[-1]:
+        is_encoder_decoder = bool(
+            getattr(getattr(self.model, "config", None), "is_encoder_decoder", False)
+        )
+        if (
+            not is_encoder_decoder
+            and input_ids is not None
+            and generated.shape[-1] > input_ids.shape[-1]
+        ):
             generated = generated[:, input_ids.shape[-1] :]
         text = self.processor.batch_decode(
             generated,
@@ -2875,6 +3253,7 @@ class BatchRunner:
         summary = BatchSummary()
         started = time.monotonic()
         worker_capabilities: dict[str, Any] = {}
+        client: Any | None = None
         try:
             if mode == "video" and video_preflight:
                 worker_cache = app_data_dir() / "worker-cache" / journal.run_id
@@ -3077,6 +3456,12 @@ class BatchRunner:
             self._emit("done", status=status, summary=summary, journal_dir=journal.project_dir)
             return summary
         finally:
+            close_client = getattr(client, "close", None)
+            if callable(close_client):
+                try:
+                    close_client()
+                except Exception:
+                    pass
             with self._media_worker_lock:
                 media_worker = self._media_worker
                 self._media_worker = None

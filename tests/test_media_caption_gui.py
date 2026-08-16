@@ -267,8 +267,9 @@ class GuiTests(unittest.TestCase):
                     "loaded_instances": list(loaded_instances),
                 }]
 
-            def load_model(_endpoint, model_key):
+            def load_model(_endpoint, model_key, *, load_profile):
                 self.assertEqual("qwen-vl-local", model_key)
+                self.assertEqual("low_vram", load_profile)
                 loaded_instances[:] = ["qwen-vl-instance"]
                 return {"instance_id": "qwen-vl-instance", "status": "loaded"}
 
@@ -1186,6 +1187,10 @@ class GuiTests(unittest.TestCase):
                     str(dialog.qianyi_lmstudio_model_box.cget("state")),
                 )
                 self.assertEqual(
+                    "readonly",
+                    str(dialog.qianyi_lmstudio_profile_box.cget("state")),
+                )
+                self.assertEqual(
                     "disabled",
                     str(dialog.qianyi_lmstudio_load_button.cget("state")),
                 )
@@ -1697,6 +1702,7 @@ class GuiTests(unittest.TestCase):
                     dialog.qianyi_route_box,
                     dialog.qianyi_local_runtime_box,
                     dialog.qianyi_lmstudio_model_box,
+                    dialog.qianyi_lmstudio_profile_box,
                 ):
                     assert_popdown_palette(combobox, gui.THEMES["night"])
                 self.assertEqual(
@@ -1720,6 +1726,7 @@ class GuiTests(unittest.TestCase):
                     dialog.qianyi_route_box,
                     dialog.qianyi_local_runtime_box,
                     dialog.qianyi_lmstudio_model_box,
+                    dialog.qianyi_lmstudio_profile_box,
                 ):
                     assert_popdown_palette(combobox, gui.THEMES["day"])
                 self.assertEqual(

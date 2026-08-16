@@ -4,8 +4,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-78%20passed-35B46F)](./tests)
-[![Version](https://img.shields.io/badge/Release-v3.6.3-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
+[![Tests](https://img.shields.io/badge/Tests-89%20passed-35B46F)](./tests)
+[![Version](https://img.shields.io/badge/Release-v3.6.4-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
 
@@ -115,7 +115,7 @@ dataset/
 - 视频任务按需启动独立媒体 Worker。检测到 FFprobe 时会先验证视频流和容器完整性；没有媒体工具时安全降级为平台原生视频输入。
 - Worker 已提供 FFmpeg 抽帧和单声道 16 kHz WAV 音频提取接口，为后续本地视频模型与语音理解能力预留统一引擎。
 - 请求层根据平台能力过滤采样字段。例如 OpenAI 不发送 `top_k`，避免因不支持的参数导致整批失败。
-- 本地 Hugging Face 后端使用工作台内的 Max Tokens、Temperature、Top P、Top K 和 Seed；LM Studio 沿用服务端的 Temperature、Top P 和 Seed，仅由工作台附加 256-token 打标输出安全上限。
+- 本地 Hugging Face 后端使用工作台内的 Max Tokens、Temperature、Top P、Top K 和 Seed；LM Studio 沿用服务端的 Temperature、Top P 和 Seed，工作台仅附加 768-token 打标输出安全上限，保留思考时上限为 1536 tokens。
 
 ### 复核与整理
 
@@ -183,9 +183,11 @@ python -m venv .venv312
 
 “外部 API / 本地模型”可在任务开始前切换。本地后端目前支持图片，视频仍使用外部 API，并提供两种运行方式：
 
-- **Hugging Face 本地目录**：加载用户指定目录中的视觉语言模型，目录必须包含 `config.json`。
+- **Hugging Face 本地目录**：加载用户指定目录中的视觉语言模型，目录必须包含 `config.json`。支持 Accelerate 自动设备分配和低内存加载；同一模型实例的生成阶段会串行保护，避免多线程同时争抢显存，文件读取与预处理仍可并行。
 - **LM Studio 本地服务**：默认连接 `http://localhost:1234/v1`。点击“刷新列表”读取已下载的视觉模型，从只读下拉框选择后点击“加载模型”；加载成功后按钮自动切换为“卸载模型”，卸载时会清除该模型的全部已加载实例。不需要选择 Hugging Face 目录或填写 API Key。
-- LM Studio 模式的 Temperature、Top P、Seed 等采样参数由 LM Studio 服务端控制。工作台只附加 256-token 输出安全上限，并将读取超时放宽到 600 秒，避免慢模型无限生成或被 180 秒固定超时误杀。
+- LM Studio 提供“低显存安全（推荐）”“纯 CPU（最稳定）”和“沿用 LM Studio 预设”三种加载策略。推荐策略会明确应用 10% GPU Offload、8192 上下文、并行 1 并关闭 MTP，避免复用旧的高显存预设；该策略只管理模型资源，Temperature、Top P、Seed 等采样参数仍由 LM Studio 控制。
+- 工作台会读取当前 LM Studio 实例的真实上下文、并行数、MTP 和推理能力。开启“移除思考标签”时会在请求阶段关闭思考，并附加 768-token 输出安全上限；保留思考时上限为 1536 tokens。读取超时保持 600 秒。
+- LM Studio 图片请求会将最长边限制为 1280 像素以降低视觉 tokens 和显存压力；若后端进程退出、显存不足、只返回思考内容或输出被截断，工作台会显示对应中文原因且不写入 TXT。
 - 若模型连续返回 `?`、替换字符或单一重复字符，任务会明确提示先恢复 LM Studio 默认或已验证的加载/采样参数；仍异常时再检查模型、Tokenizer、量化文件与 mmproj，不会把退化输出写入 TXT。
 
 两种本地方式的并发数都由用户在任务设置中决定。界面会持续提示显存与内存风险，建议先使用 1，并根据硬件资源和模型稳定性逐步提高。
@@ -227,7 +229,7 @@ python -m venv .venv312
 ## 构建 Windows EXE
 
 ```powershell
-.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.3.spec
+.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.4.spec
 ```
 
 构建配置只收集运行所需代码与视觉资源，不打入 API Key、用户设置、项目记录或本地模型权重。如果存在 `assets/media/`，构建时会一并收集 FFmpeg 媒体组件。
@@ -243,7 +245,7 @@ python -m venv .venv312
 ├── media_caption_core.py         # 扫描、模型路由、HTTP、日志与批任务
 ├── media_caption_worker.py       # 按需媒体 Worker、安全通信与 FFmpeg 接口
 ├── media_caption_tool_v3.py      # Tkinter 桌面工作台
-├── MediaCaptionTool-3.6.3.spec   # PyInstaller 单文件构建
+├── MediaCaptionTool-3.6.4.spec   # PyInstaller 单文件构建
 ├── CHANGELOG.md                  # 每次公开版本的完整更新记录
 ├── SECURITY.md                   # 凭据、模板、本地数据与发布边界
 ├── requirements.txt              # 基础依赖

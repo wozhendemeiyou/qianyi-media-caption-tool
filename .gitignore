@@ -6,6 +6,7 @@ __pycache__/
 # Build and release output
 build/
 dist/
+dist-stage/
 *.zip
 *.exe
 

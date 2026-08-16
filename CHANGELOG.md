@@ -2,6 +2,20 @@
 
 本文件记录芊熠智能打标工作台每个公开版本的主要变化。日期均使用北京时间。
 
+## [3.6.4] - 2026-08-16
+
+- LM Studio 新增“低显存安全 / 纯 CPU / 沿用预设”三种加载策略；默认通过本机 CLI 明确应用 10% GPU Offload、8192 上下文、并行 1 与关闭 MTP，避免一键加载继续复用危险的旧显存预设。
+- 模型列表会读取并显示真实实例配置、推理能力、模型大小与加载状态，不再只判断是否存在实例。
+- LM Studio 的 Temperature、Top P 和 Seed 等采样设置继续由服务端接管；工作台的打标输出安全上限调整为 768 tokens，保留思考时放宽至 1536 tokens。
+- 开启“移除思考标签”后，LM Studio 请求会发送 `reasoning_effort: none`，在生成前关闭思考；不再等思考耗尽输出预算后才删除标签。
+- LM Studio 图片最长边限制为 1280 像素并提高 JPEG 质量上限，减少视觉 tokens、显存压力和首段处理时间，同时保留打标所需细节。
+- `HTTP 400 {"error":"terminated"}`、显存不足、服务未启动、思考预算耗尽与截断输出现在均提供明确中文原因，异常结果不会写入 TXT。
+- Hugging Face 多并发推理增加生成锁，避免同一模型实例被多个线程同时争抢 KV Cache；文件读取和图片预处理仍可并行。
+- Hugging Face 大模型改用 Accelerate 自动设备分配与低内存加载，支持 GPU/CPU 安全拆分；补充显存不足提示、思考关闭参数、编码器—解码器输出裁剪修复及任务结束后的显存缓存释放。
+- 设置架构升级为 13，新增 LM Studio 加载策略持久化与异常配置恢复。
+- 使用 Qwen3.8-27B 对同一失败图片真机验证：不再出现 `terminated`，思考 tokens 降为 0，处理耗时由约 239.7 秒降低至约 99.9 秒。
+- 自动化测试增至 89 项，GUI 自检、公开发布安全扫描及冻结版 EXE 启动检查全部通过。
+
 ## [3.6.3] - 2026-08-16
 
 - 本地模型并发不再被强制锁定为 1；用户可在 1 至 10 之间自行选择，界面持续提示显存与内存占用风险并建议从 1 开始。
@@ -121,6 +135,7 @@
 - API Key 使用 Windows DPAPI 加密，本地视觉语言模型可选单并发运行。
 - 44 项自动化测试与标准离线压力测试通过。
 
+[3.6.4]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.4
 [3.6.3]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.3
 [3.6.2]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.2
 [3.6.1]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.1

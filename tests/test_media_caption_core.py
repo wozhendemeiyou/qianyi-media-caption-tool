@@ -50,6 +50,9 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(core.DEFAULT_SETTINGS["remove_thinking_tags"])
         self.assertEqual("huggingface", core.DEFAULT_SETTINGS["local_runtime"])
         self.assertEqual(
+            "low_vram", core.DEFAULT_SETTINGS["lmstudio_load_profile"]
+        )
+        self.assertEqual(
             "http://localhost:1234/v1",
             core.DEFAULT_SETTINGS["lmstudio_base_url"],
         )
@@ -347,8 +350,19 @@ class CoreTests(unittest.TestCase):
                         "type": "llm",
                         "key": "qwen-vl-local",
                         "display_name": "Qwen VL",
-                        "capabilities": {"vision": True},
-                        "loaded_instances": [{"id": "qwen-vl-local"}],
+                        "capabilities": {
+                            "vision": True,
+                            "reasoning": {
+                                "allowed_options": ["off", "on"],
+                                "default": "on",
+                            },
+                        },
+                        "size_bytes": 123456,
+                        "params_string": "7B",
+                        "loaded_instances": [{
+                            "id": "qwen-vl-local",
+                            "config": {"context_length": 8192, "parallel": 1},
+                        }],
                     },
                     {
                         "type": "llm",
@@ -382,6 +396,12 @@ class CoreTests(unittest.TestCase):
             core.HttpTransport(sender),
         )
         self.assertEqual(["qwen-vl-local"], inventory[0]["loaded_instances"])
+        self.assertEqual(
+            {"context_length": 8192, "parallel": 1},
+            inventory[0]["loaded_configs"]["qwen-vl-local"],
+        )
+        self.assertEqual("on", inventory[0]["reasoning"]["default"])
+        self.assertEqual(123456, inventory[0]["size_bytes"])
 
     def test_lmstudio_load_and_unload_use_native_management_api(self):
         calls = []
@@ -412,7 +432,17 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             "http://localhost:1234/api/v1/models/load", calls[0][1]
         )
-        self.assertEqual({"model": "qwen-vl-local"}, calls[0][2]["json"])
+        self.assertEqual(
+            {
+                "model": "qwen-vl-local",
+                "echo_load_config": True,
+                "context_length": core.LMSTUDIO_LOAD_CONTEXT_LENGTH,
+                "eval_batch_size": 512,
+                "flash_attention": True,
+                "offload_kv_cache_to_gpu": False,
+            },
+            calls[0][2]["json"],
+        )
         self.assertEqual(
             "http://localhost:1234/api/v1/models/unload", calls[1][1]
         )
@@ -460,6 +490,7 @@ class CoreTests(unittest.TestCase):
                 core.LMSTUDIO_CAPTION_TOKEN_LIMIT,
                 payload["max_tokens"],
             )
+            self.assertEqual("none", payload["reasoning_effort"])
             for parameter in (
                 "temperature", "top_p", "top_k", "seed"
             ):
@@ -469,6 +500,85 @@ class CoreTests(unittest.TestCase):
             )
             image_url = payload["messages"][0]["content"][0]["image_url"]["url"]
             self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
+
+    def test_lmstudio_low_vram_loader_uses_cli_resource_guards(self):
+        completed = mock.Mock(returncode=0, stdout="loaded", stderr="")
+        inventory = [{
+            "key": "qwen-vl-local",
+            "loaded_instances": ["qwen-vl-local"],
+            "loaded_configs": {
+                "qwen-vl-local": {"context_length": 8192, "parallel": 1}
+            },
+        }]
+        with mock.patch.object(
+            core, "find_lmstudio_cli", return_value=Path("C:/fake/lms.exe")
+        ):
+            with mock.patch.object(core.subprocess, "run", return_value=completed) as run:
+                with mock.patch.object(
+                    core, "list_lmstudio_models", return_value=inventory
+                ):
+                    result = core.load_lmstudio_model(
+                        "http://localhost:1234/v1",
+                        "qwen-vl-local",
+                        load_profile="low_vram",
+                    )
+
+        command = run.call_args.args[0]
+        self.assertIn("--gpu", command)
+        self.assertEqual("0.10", command[command.index("--gpu") + 1])
+        self.assertEqual("8192", command[command.index("--context-length") + 1])
+        self.assertEqual("1", command[command.index("--parallel") + 1])
+        self.assertIn("--no-speculative-draft-mtp", command)
+        self.assertEqual("cli", result["loader"])
+        self.assertEqual(8192, result["load_config"]["context_length"])
+
+    def test_lmstudio_terminated_error_is_translated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+
+            def sender(method, url, **kwargs):
+                return FakeResponse(
+                    status_code=400,
+                    payload={"error": "terminated"},
+                )
+
+            client = core.LmStudioCaptionClient(
+                "http://localhost:1234/v1",
+                "qwen-vl-local",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+            )
+            with self.assertRaisesRegex(RuntimeError, "模型进程.*退出"):
+                client.caption_image(image_path, "描述图片")
+
+    def test_lmstudio_rejects_reasoning_only_length_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+
+            def sender(method, url, **kwargs):
+                return FakeResponse(payload={
+                    "choices": [{
+                        "finish_reason": "length",
+                        "message": {
+                            "content": "",
+                            "reasoning_content": "仍在分析",
+                        },
+                    }],
+                    "usage": {
+                        "completion_tokens_details": {"reasoning_tokens": 768}
+                    },
+                })
+
+            client = core.LmStudioCaptionClient(
+                "http://localhost:1234/v1",
+                "qwen-vl-local",
+                core.CancellationToken(),
+                core.HttpTransport(sender),
+            )
+            with self.assertRaisesRegex(RuntimeError, "思考内容占用"):
+                client.caption_image(image_path, "描述图片")
 
     def test_lmstudio_rejects_degenerate_repeated_character_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1044,6 +1154,7 @@ class CoreTests(unittest.TestCase):
                     "local_runtime": "unknown",
                     "lmstudio_base_url": "   ",
                     "lmstudio_model": ["not", "text"],
+                    "lmstudio_load_profile": "unsafe",
                 }),
                 encoding="utf-8",
             )
@@ -1065,6 +1176,7 @@ class CoreTests(unittest.TestCase):
                 "http://localhost:1234/v1", settings["lmstudio_base_url"]
             )
             self.assertEqual("", settings["lmstudio_model"])
+            self.assertEqual("low_vram", settings["lmstudio_load_profile"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", settings)
 
             settings["concurrency"] = "also-invalid"
@@ -1073,7 +1185,7 @@ class CoreTests(unittest.TestCase):
             persisted = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(3, persisted["concurrency"])
             self.assertEqual("night", persisted["theme"])
-            self.assertEqual(12, persisted["version"])
+            self.assertEqual(13, persisted["version"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", persisted)
 
     def test_project_summary_reports_saved_progress_and_directory_state(self):

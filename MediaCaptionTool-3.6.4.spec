@@ -36,7 +36,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="MediaCaptionTool-3.6.3-Studio",
+    name="MediaCaptionTool-3.6.4-Studio",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
