@@ -24,6 +24,7 @@ try:
         QApplication,
         QCheckBox,
         QComboBox,
+        QDialog,
         QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
@@ -59,6 +60,7 @@ import media_caption_core as core
 from qt_ui import (
     BatchWorker,
     DropListWidget,
+    FunctionWorker,
     LmStudioInventoryWorker,
     LmStudioLoadWorker,
     LmStudioUnloadWorker,
@@ -85,6 +87,173 @@ def _font(size: int = 14, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
     font = QFont("Microsoft YaHei UI", size)
     font.setWeight(weight)
     return font
+
+
+class SingleMediaDialog(QDialog):
+    """Modern clip editor that reuses the existing FFmpeg media worker."""
+
+    def __init__(self, on_ready, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.on_ready = on_ready
+        self.source: Path | None = None
+        self.probe_info: dict[str, Any] = {}
+        self._worker: FunctionWorker | None = None
+        self.setWindowTitle("单次反推 · 音视频片段编辑器")
+        self.setMinimumSize(680, 430)
+        layout = QVBoxLayout(self)
+        heading = QLabel("✂ 音视频片段编辑器")
+        heading.setFont(_font(19, QFont.Weight.Bold))
+        layout.addWidget(heading)
+        intro = QLabel("手工选择起止时间，截取后可直接加入单次反推；原文件不会被修改。")
+        intro.setWordWrap(True)
+        intro.setObjectName("muted")
+        layout.addWidget(intro)
+        form = QFormLayout()
+        file_row = QHBoxLayout()
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText("选择视频或音频文件")
+        choose = QPushButton("选择…")
+        choose.clicked.connect(self.choose_file)
+        file_row.addWidget(self.file_edit, 1)
+        file_row.addWidget(choose)
+        file_host = QWidget()
+        file_host.setLayout(file_row)
+        form.addRow("媒体文件", file_host)
+        self.probe_label = QLabel("尚未读取媒体信息")
+        self.probe_label.setObjectName("muted")
+        form.addRow("轨道信息", self.probe_label)
+        self.start_spin = QDoubleSpinBox()
+        self.start_spin.setRange(0, 86400)
+        self.start_spin.setDecimals(3)
+        self.start_spin.setSuffix(" 秒")
+        form.addRow("开始", self.start_spin)
+        self.end_spin = QDoubleSpinBox()
+        self.end_spin.setRange(0, 86400)
+        self.end_spin.setDecimals(3)
+        self.end_spin.setSuffix(" 秒")
+        form.addRow("结束", self.end_spin)
+        self.audio_check = QCheckBox("保留音轨")
+        self.audio_check.setChecked(True)
+        form.addRow("音频", self.audio_check)
+        layout.addLayout(form)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        buttons = QHBoxLayout()
+        self.probe_button = QPushButton("读取媒体信息")
+        self.probe_button.clicked.connect(self.probe_media)
+        self.trim_button = QPushButton("截取并加入单次反推")
+        self.trim_button.setObjectName("primary")
+        self.trim_button.setEnabled(False)
+        self.trim_button.clicked.connect(self.trim_media)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.reject)
+        buttons.addWidget(self.probe_button)
+        buttons.addWidget(self.trim_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def choose_file(self) -> None:
+        value, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择音视频",
+            self.file_edit.text(),
+            "媒体文件 (*.mp4 *.mov *.avi *.mp3 *.wav *.m4a *.aac *.flac *.ogg)",
+        )
+        if value:
+            self.file_edit.setText(value)
+            self.probe_media()
+
+    @staticmethod
+    def _probe(path: Path) -> dict[str, Any]:
+        worker = core.MediaWorkerController([path.parent])
+        try:
+            return worker.probe(path)
+        finally:
+            worker.close()
+
+    @staticmethod
+    def _trim(path: Path, output: Path, start: float, end: float, include_audio: bool) -> Path:
+        worker = core.MediaWorkerController([path.parent, output.parent])
+        try:
+            return worker.trim_video(path, output, start, end, include_audio)
+        finally:
+            worker.close()
+
+    def _run(self, function, *args, success, failure) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.progress.show()
+        self.probe_button.setEnabled(False)
+        self.trim_button.setEnabled(False)
+        worker = FunctionWorker(function, *args)
+        worker.succeeded.connect(success)
+        worker.failed.connect(failure)
+        worker.finished.connect(self._worker_finished)
+        self._worker = worker
+        worker.start()
+
+    def _worker_finished(self) -> None:
+        self.progress.hide()
+        self.probe_button.setEnabled(True)
+        self.trim_button.setEnabled(bool(self.probe_info))
+
+    def probe_media(self) -> None:
+        source = Path(self.file_edit.text().strip())
+        if not source.is_file():
+            self.probe_label.setText("文件不存在")
+            return
+        self.source = source
+        self._run(
+            self._probe,
+            source,
+            success=self._probe_success,
+            failure=lambda message: self.probe_label.setText(f"读取失败：{message}"),
+        )
+
+    def _probe_success(self, info: dict[str, Any]) -> None:
+        self.probe_info = info
+        duration = max(0.0, float(info.get("duration") or 0.0))
+        self.start_spin.setRange(0.0, duration)
+        self.end_spin.setRange(0.0, duration)
+        self.end_spin.setValue(duration)
+        video = len(info.get("video_streams") or [])
+        audio = len(info.get("audio_streams") or [])
+        self.probe_label.setText(
+            f"时长 {duration:.3f} 秒 · 视频轨 {video} · 音频轨 {audio} · {info.get('format', '')}"
+        )
+        self.trim_button.setEnabled(duration >= 0.25)
+
+    def trim_media(self) -> None:
+        if self.source is None or not self.probe_info:
+            return
+        start = self.start_spin.value()
+        end = self.end_spin.value()
+        if end <= start:
+            self.probe_label.setText("结束时间必须大于开始时间")
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "保存截取片段", str(self.source.with_name(f"{self.source.stem}-clip.mp4")),
+            "MP4 视频 (*.mp4)",
+        )
+        if not output:
+            return
+        self._run(
+            self._trim,
+            self.source,
+            Path(output),
+            start,
+            end,
+            self.audio_check.isChecked(),
+            success=self._trim_success,
+            failure=lambda message: self.probe_label.setText(f"截取失败：{message}"),
+        )
+
+    def _trim_success(self, output: Path) -> None:
+        self.on_ready(Path(output))
+        self.accept()
 
 
 class ModernMainWindow(QMainWindow):
@@ -398,6 +567,8 @@ class ModernMainWindow(QMainWindow):
         actions = QHBoxLayout()
         self.single_button = QPushButton("单次反推")
         self.single_button.clicked.connect(self.run_single)
+        self.clip_editor_button = QPushButton("音视频编辑器")
+        self.clip_editor_button.clicked.connect(self.open_media_editor)
         self.start_button = QPushButton("开始批量反推")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.run_batch)
@@ -405,6 +576,7 @@ class ModernMainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_batch)
         actions.addWidget(self.single_button)
+        actions.addWidget(self.clip_editor_button)
         actions.addWidget(self.start_button)
         actions.addWidget(self.stop_button)
         layout.addLayout(actions)
@@ -777,6 +949,17 @@ class ModernMainWindow(QMainWindow):
             self.current_folder = valid[0].parent
             self.folder_edit.setText(str(self.current_folder))
             self.log(f"已加入 {len(valid)} 个素材，可使用“单次反推”处理。")
+
+    def open_media_editor(self) -> None:
+        dialog = SingleMediaDialog(self._accept_single_clip, self)
+        dialog.setStyleSheet(self.styleSheet())
+        dialog.exec()
+
+    def _accept_single_clip(self, path: Path) -> None:
+        self.select_mode("video")
+        self.add_dropped_files([path])
+        self.focus_single_reverse()
+        self.log(f"片段已准备完成：{path.name}，可点击“单次反推”。")
 
     def _batch_kwargs(self, paths: list[Path], write_output: bool) -> dict[str, Any]:
         self.save_settings()

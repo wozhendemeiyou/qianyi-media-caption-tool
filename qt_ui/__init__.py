@@ -4,6 +4,7 @@ from .theme import THEMES, build_stylesheet
 from .widgets import DropListWidget, PathPicker, SectionCard
 from .workers import (
     BatchWorker,
+    FunctionWorker,
     LmStudioInventoryWorker,
     LmStudioLoadWorker,
     LmStudioUnloadWorker,
@@ -14,6 +15,7 @@ from .workers import (
 __all__ = [
     "THEMES",
     "BatchWorker",
+    "FunctionWorker",
     "LmStudioInventoryWorker",
     "LmStudioLoadWorker",
     "LmStudioUnloadWorker",

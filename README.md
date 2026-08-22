@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-99%20passed-35B46F)](./tests)
+[![Tests](https://img.shields.io/badge/Tests-106%20passed-35B46F)](./tests)
 [![Version](https://img.shields.io/badge/Demo-v3.6.demo-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
