@@ -40,7 +40,10 @@ from media_caption_worker import (
 
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.6.6"
+# Demo builds intentionally carry a readable channel suffix.  Numeric version
+# comparison still uses the ``3.6`` portion, while Windows fixed-file metadata
+# remains numeric in assets/qianyi-version-info.txt.
+APP_VERSION = "3.6.demo"
 GITHUB_REPOSITORY = "wozhendemeiyou/qianyi-media-caption-tool"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = (

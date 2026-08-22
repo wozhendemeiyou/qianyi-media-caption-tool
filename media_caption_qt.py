@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
 try:
-    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtCore import Qt, Slot
     from PySide6.QtGui import QAction, QCloseEvent, QFont, QIcon
     from PySide6.QtWidgets import (
         QApplication,
@@ -57,38 +56,22 @@ except ImportError:  # pragma: no cover - exercised only without the optional ex
     QApplication = None  # type: ignore[assignment]
 
 import media_caption_core as core
+from qt_ui import (
+    BatchWorker,
+    DropListWidget,
+    LmStudioInventoryWorker,
+    LmStudioLoadWorker,
+    LmStudioUnloadWorker,
+    ProviderTestWorker,
+    SectionCard,
+    THEMES,
+    UpdateCheckWorker,
+    build_stylesheet,
+)
 
 
 APP_VERSION = core.APP_VERSION
 APP_TITLE = "芊熠智能打标工作台 · Modern"
-
-THEMES: dict[str, dict[str, str]] = {
-    "day": {
-        "window": "#f2eee5",
-        "surface": "#fbf8f1",
-        "surface_alt": "#e9e3d7",
-        "input": "#fffdf8",
-        "border": "#c8bda9",
-        "text": "#282522",
-        "muted": "#6f675b",
-        "accent": "#d75537",
-        "accent_soft": "#f2d5c7",
-        "success": "#3b8061",
-    },
-    "night": {
-        "window": "#20242b",
-        "surface": "#292f37",
-        "surface_alt": "#343b45",
-        "input": "#252b33",
-        "border": "#4b5664",
-        "text": "#eef0eb",
-        "muted": "#aeb6b2",
-        "accent": "#f27756",
-        "accent_soft": "#553b38",
-        "success": "#80c49a",
-    },
-}
-
 
 def _ensure_qt() -> None:
     if QApplication is None:
@@ -104,51 +87,6 @@ def _font(size: int = 14, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
     return font
 
 
-class DropListWidget(QListWidget):
-    files_dropped = Signal(list)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls()]
-        paths = [path for path in paths if path.is_file()]
-        if paths:
-            self.files_dropped.emit(paths)
-        event.acceptProposedAction()
-
-
-class BatchWorker(QThread):
-    event_received = Signal(str, object)
-    completed = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, kwargs: dict[str, Any]) -> None:
-        super().__init__()
-        self.kwargs = kwargs
-        self.runner = core.BatchRunner(self._on_event)
-
-    def _on_event(self, kind: str, payload: dict[str, Any]) -> None:
-        self.event_received.emit(kind, payload)
-
-    def run(self) -> None:  # noqa: D401
-        try:
-            self.completed.emit(self.runner.run(**self.kwargs))
-        except Exception as error:  # pragma: no cover - provider/runtime dependent
-            self.failed.emit(str(error))
-
-    def cancel(self) -> None:
-        self.runner.cancel()
-
-
 class ModernMainWindow(QMainWindow):
     """Three-column Qt shell backed by the existing stable core."""
 
@@ -160,6 +98,7 @@ class ModernMainWindow(QMainWindow):
         self.current_folder: Path | None = None
         self.media_paths: list[Path] = []
         self.worker: BatchWorker | None = None
+        self._aux_workers: set[object] = set()
         self._provider_model_memory: dict[str, str] = dict(
             self.settings.get("api_models") or {}
         )
@@ -179,14 +118,18 @@ class ModernMainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(toolbar)
-        for label, hint in (
-            ("项目中心", "选择目录并扫描素材"),
-            ("图像打标", "图片批量反推"),
-            ("视频反推", "视频批量反推"),
-            ("单次反推", "单张/单个媒体，不改写原 TXT"),
-        ):
+        nav_items = (
+            ("项目中心", "选择目录并扫描素材", self.focus_project_center),
+            ("图像打标", "图片批量反推", lambda: self.select_mode("image")),
+            ("视频反推", "视频批量反推", lambda: self.select_mode("video")),
+            ("单次反推", "单张/单个媒体，不改写原 TXT", self.focus_single_reverse),
+            ("平台设置", "运行后端与模型设置", self.focus_platform_settings),
+            ("系统说明", "功能说明与版本检查", self.focus_system_info),
+        )
+        for label, hint, handler in nav_items:
             action = QAction(label, self)
             action.setToolTip(hint)
+            action.triggered.connect(handler)
             toolbar.addAction(action)
         toolbar.addSeparator()
         self.theme_action = QAction("切换日光/夜光", self)
@@ -213,6 +156,32 @@ class ModernMainWindow(QMainWindow):
         self.columns.setStretchFactor(2, 3)
         root_layout.addWidget(self.columns, 1)
         self.setCentralWidget(root)
+
+    def select_mode(self, mode: str) -> None:
+        index = self.mode_box.findData(mode)
+        if index >= 0:
+            self.mode_box.setCurrentIndex(index)
+        self.statusBar().showMessage(
+            "已切换到图像打标" if mode == "image" else "已切换到视频反推", 2500
+        )
+
+    def focus_project_center(self) -> None:
+        self.folder_edit.setFocus()
+        self.statusBar().showMessage("项目中心：选择目录后扫描素材", 3000)
+
+    def focus_single_reverse(self) -> None:
+        self.material_list.setFocus()
+        if self.material_list.count() and not self.material_list.selectedItems():
+            self.material_list.setCurrentRow(0)
+        self.statusBar().showMessage("单次反推：选择一个素材后点击单次反推", 3000)
+
+    def focus_platform_settings(self) -> None:
+        self.provider_box.setFocus()
+        self.statusBar().showMessage("平台设置已定位到左侧", 2500)
+
+    def focus_system_info(self) -> None:
+        self.tabs.setCurrentWidget(self.system_info)
+        self.statusBar().showMessage("系统说明与版本检查", 2500)
 
     def _build_header(self) -> QWidget:
         frame = QFrame()
@@ -244,8 +213,8 @@ class ModernMainWindow(QMainWindow):
         scroll.setWidget(widget)
         return scroll
 
-    def _group(self, title: str, object_name: str = "card") -> QGroupBox:
-        group = QGroupBox(title)
+    def _group(self, title: str, object_name: str = "card") -> SectionCard:
+        group = SectionCard(title)
         group.setObjectName(object_name)
         group.setFont(_font(15, QFont.Weight.Bold))
         return group
@@ -262,10 +231,7 @@ class ModernMainWindow(QMainWindow):
 
     def _build_platform_group(self) -> QWidget:
         group = self._group("◈ 平台设置")
-        form = QFormLayout(group)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(8)
+        form = group.form
         self.backend_box = QComboBox()
         self.backend_box.addItem("外部 API", "api")
         self.backend_box.addItem("本地模型", "local")
@@ -287,6 +253,9 @@ class ModernMainWindow(QMainWindow):
         self.endpoint_edit = QLineEdit()
         self.endpoint_edit.setPlaceholderText("仅自定义接口需要填写")
         form.addRow("Base URL", self.endpoint_edit)
+        self.provider_test_button = QPushButton("测试连接")
+        self.provider_test_button.clicked.connect(self.test_provider)
+        form.addRow("API 平台", self.provider_test_button)
 
         self.runtime_box = QComboBox()
         self.runtime_box.addItem("Hugging Face 本地目录", "huggingface")
@@ -303,12 +272,37 @@ class ModernMainWindow(QMainWindow):
         form.addRow("LM Base URL", self.lm_url_edit)
         self.lm_model_edit = QLineEdit()
         form.addRow("LM 模型", self.lm_model_edit)
+        self.lm_profile_box = QComboBox()
+        self.lm_profile_box.addItem("低显存安全", "low_vram")
+        self.lm_profile_box.addItem("纯 CPU", "cpu")
+        self.lm_profile_box.addItem("沿用预设", "inherit")
+        form.addRow("LM 加载策略", self.lm_profile_box)
+        lm_actions = QHBoxLayout()
+        self.lm_refresh_button = QPushButton("刷新模型")
+        self.lm_refresh_button.clicked.connect(self.refresh_lm_models)
+        self.lm_load_button = QPushButton("加载模型")
+        self.lm_load_button.clicked.connect(self.load_lm_model)
+        self.lm_unload_button = QPushButton("卸载模型")
+        self.lm_unload_button.clicked.connect(self.unload_lm_model)
+        lm_actions.addWidget(self.lm_refresh_button)
+        lm_actions.addWidget(self.lm_load_button)
+        lm_actions.addWidget(self.lm_unload_button)
+        lm_host = QWidget()
+        lm_host.setLayout(lm_actions)
+        form.addRow("LM Studio", lm_host)
+        self.lm_instance_edit = QLineEdit()
+        self.lm_instance_edit.setPlaceholderText("加载后自动填入实例 ID")
+        form.addRow("实例 ID", self.lm_instance_edit)
         self.llama_server_edit = QLineEdit()
         self.llama_model_edit = QLineEdit()
         self.llama_mmproj_edit = QLineEdit()
         form.addRow("llama-server", self._path_row(self.llama_server_edit, False))
         form.addRow("GGUF 主模型", self._path_row(self.llama_model_edit, False))
         form.addRow("视觉 mmproj", self._path_row(self.llama_mmproj_edit, False))
+        self.llama_context = self._spin(512, 131072, core.LLAMA_CPP_DEFAULT_CONTEXT_LENGTH)
+        self.llama_gpu_layers = self._spin(-1, 999, core.LLAMA_CPP_DEFAULT_GPU_LAYERS)
+        form.addRow("GGUF 上下文", self.llama_context)
+        form.addRow("GPU 层数", self.llama_gpu_layers)
 
         self.mtp_check = QCheckBox("启用 MTP（仅兼容的 Hugging Face 模型）")
         self.thinking_check = QCheckBox("移除思考标签")
@@ -321,8 +315,7 @@ class ModernMainWindow(QMainWindow):
 
     def _build_sampling_group(self) -> QWidget:
         group = self._group("◌ 采样参数")
-        form = QFormLayout(group)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form = group.form
         self.preset_box = QComboBox()
         self.preset_box.addItems(["稳定反推", "平衡反推", "创意反推"])
         self.preset_box.currentTextChanged.connect(self.apply_preset)
@@ -393,7 +386,9 @@ class ModernMainWindow(QMainWindow):
         self.material_hint.setObjectName("muted")
         self.material_hint.setWordWrap(True)
         layout.addWidget(self.material_hint)
-        prompt_group = self._group("✦ 用户提示词")
+        prompt_group = QGroupBox("✦ 用户提示词")
+        prompt_group.setObjectName("card")
+        prompt_group.setFont(_font(15, QFont.Weight.Bold))
         prompt_layout = QVBoxLayout(prompt_group)
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("输入你希望模型重点描述的内容…")
@@ -444,6 +439,21 @@ class ModernMainWindow(QMainWindow):
         self.tabs.addTab(self.log_edit, "运行日志")
         self.tabs.addTab(self.system_info, "系统说明")
         layout.addWidget(self.tabs, 1)
+        action_row = QHBoxLayout()
+        self.save_result_button = QPushButton("保存当前结果")
+        self.save_result_button.clicked.connect(self.save_current_result)
+        self.export_json_button = QPushButton("导出 JSONL")
+        self.export_json_button.clicked.connect(lambda: self.export_captions("jsonl"))
+        self.export_csv_button = QPushButton("导出 CSV")
+        self.export_csv_button.clicked.connect(lambda: self.export_captions("csv"))
+        self.update_button = QPushButton("检查更新")
+        self.update_button.clicked.connect(self.check_updates)
+        action_row.addWidget(self.save_result_button)
+        action_row.addWidget(self.export_json_button)
+        action_row.addWidget(self.export_csv_button)
+        action_row.addStretch(1)
+        action_row.addWidget(self.update_button)
+        layout.addLayout(action_row)
         self.metrics = QLabel("尚未开始任务")
         self.metrics.setObjectName("muted")
         self.metrics.setWordWrap(True)
@@ -491,9 +501,14 @@ class ModernMainWindow(QMainWindow):
         self.local_folder_edit.setText(str(settings.get("local_model_folder", "")))
         self.lm_url_edit.setText(str(settings.get("lmstudio_base_url", core.DEFAULT_SETTINGS["lmstudio_base_url"])))
         self.lm_model_edit.setText(str(settings.get("lmstudio_model", "")))
+        self.lm_profile_box.setCurrentIndex(
+            max(0, self.lm_profile_box.findData(settings.get("lmstudio_load_profile", "low_vram")))
+        )
         self.llama_server_edit.setText(str(settings.get("llama_server_path", "")))
         self.llama_model_edit.setText(str(settings.get("llama_model_path", "")))
         self.llama_mmproj_edit.setText(str(settings.get("llama_mmproj_path", "")))
+        self.llama_context.setValue(int(settings.get("llama_context_length", core.LLAMA_CPP_DEFAULT_CONTEXT_LENGTH)))
+        self.llama_gpu_layers.setValue(int(settings.get("llama_gpu_layers", core.LLAMA_CPP_DEFAULT_GPU_LAYERS)))
         self.mtp_check.setChecked(bool(settings.get("enable_mtp", False)))
         self.thinking_check.setChecked(bool(settings.get("remove_thinking_tags", True)))
         sampling = core.normalize_sampling(settings.get("sampling"))
@@ -520,12 +535,17 @@ class ModernMainWindow(QMainWindow):
 
     def _backend_changed(self) -> None:
         is_api = self.backend_box.currentData() == "api"
-        for widget in (self.provider_box, self.model_edit, self.api_key_edit, self.endpoint_edit):
+        for widget in (
+            self.provider_box, self.model_edit, self.api_key_edit,
+            self.endpoint_edit, self.provider_test_button,
+        ):
             widget.setEnabled(is_api)
         for widget in (
             self.runtime_box, self.local_folder_edit, self.lm_url_edit,
-            self.lm_model_edit, self.llama_server_edit, self.llama_model_edit,
-            self.llama_mmproj_edit, self.mtp_check,
+            self.lm_model_edit, self.lm_profile_box, self.lm_refresh_button,
+            self.lm_load_button, self.lm_unload_button, self.lm_instance_edit,
+            self.llama_server_edit, self.llama_model_edit, self.llama_mmproj_edit,
+            self.llama_context, self.llama_gpu_layers, self.mtp_check,
         ):
             widget.setEnabled(not is_api)
         self.backend_badge.setText("外部 API" if is_api else "本地模型")
@@ -546,8 +566,15 @@ class ModernMainWindow(QMainWindow):
         self.local_folder_edit.setEnabled(local and runtime == "huggingface")
         self.lm_url_edit.setEnabled(local and runtime == "lmstudio")
         self.lm_model_edit.setEnabled(local and runtime == "lmstudio")
+        self.lm_profile_box.setEnabled(local and runtime == "lmstudio")
+        self.lm_refresh_button.setEnabled(local and runtime == "lmstudio")
+        self.lm_load_button.setEnabled(local and runtime == "lmstudio")
+        self.lm_unload_button.setEnabled(local and runtime == "lmstudio")
+        self.lm_instance_edit.setEnabled(local and runtime == "lmstudio")
         for widget in (self.llama_server_edit, self.llama_model_edit, self.llama_mmproj_edit):
             widget.setEnabled(local and runtime == "llamacpp")
+        self.llama_context.setEnabled(local and runtime == "llamacpp")
+        self.llama_gpu_layers.setEnabled(local and runtime == "llamacpp")
         self.mtp_check.setEnabled(local and runtime == "huggingface")
 
     def _sampling(self) -> dict[str, Any]:
@@ -580,9 +607,12 @@ class ModernMainWindow(QMainWindow):
             "local_runtime": self.runtime_box.currentData(),
             "lmstudio_base_url": self.lm_url_edit.text().strip(),
             "lmstudio_model": self.lm_model_edit.text().strip(),
+            "lmstudio_load_profile": self.lm_profile_box.currentData(),
             "llama_server_path": self.llama_server_edit.text().strip(),
             "llama_model_path": self.llama_model_edit.text().strip(),
             "llama_mmproj_path": self.llama_mmproj_edit.text().strip(),
+            "llama_context_length": self.llama_context.value(),
+            "llama_gpu_layers": self.llama_gpu_layers.value(),
             "enable_mtp": self.mtp_check.isChecked(),
             "remove_thinking_tags": self.thinking_check.isChecked(),
             "sampling": self._sampling(),
@@ -595,6 +625,89 @@ class ModernMainWindow(QMainWindow):
         self.settings = self.settings_store.load()
         self.log("设置已保存；API KEY 使用本机安全存储。")
         self.statusBar().showMessage("设置已保存", 3000)
+
+    def _track_aux_worker(self, worker) -> None:
+        self._aux_workers.add(worker)
+        worker.finished.connect(lambda: self._aux_workers.discard(worker))
+        worker.start()
+
+    def test_provider(self) -> None:
+        provider_key = str(self.provider_box.currentData() or core.DEFAULT_PROVIDER_KEY)
+        worker = ProviderTestWorker(
+            provider_key,
+            self.api_key_edit.text().strip(),
+            self.endpoint_edit.text().strip() if provider_key == "custom" else "",
+        )
+        worker.succeeded.connect(
+            lambda result: self._provider_test_succeeded(provider_key, result)
+        )
+        worker.failed.connect(lambda message: self._provider_test_failed(message))
+        self.provider_test_button.setEnabled(False)
+        worker.finished.connect(lambda: self.provider_test_button.setEnabled(True))
+        self.log(f"正在测试 {core.API_PROVIDERS[provider_key].label} 连接…")
+        self._track_aux_worker(worker)
+
+    def _provider_test_succeeded(self, provider_key: str, result: dict[str, Any]) -> None:
+        label = core.API_PROVIDERS[provider_key].label
+        latency = result.get("latency_ms", "?")
+        self.log(f"连接正常：{label}，HTTP {result.get('status', 200)}，{latency} ms")
+        self.statusBar().showMessage("连接测试正常", 3000)
+
+    def _provider_test_failed(self, message: str) -> None:
+        self.log(f"连接测试失败：{message}")
+        self.statusBar().showMessage("连接测试失败", 3000)
+
+    def refresh_lm_models(self) -> None:
+        worker = LmStudioInventoryWorker(self.lm_url_edit.text().strip())
+        worker.succeeded.connect(self._lm_models_loaded)
+        worker.failed.connect(lambda message: self.log(f"LM Studio 刷新失败：{message}"))
+        self.lm_refresh_button.setEnabled(False)
+        worker.finished.connect(lambda: self.lm_refresh_button.setEnabled(True))
+        self.log("正在读取 LM Studio 模型列表…")
+        self._track_aux_worker(worker)
+
+    def _lm_models_loaded(self, models: list[dict[str, Any]]) -> None:
+        keys = [str(item.get("key") or "").strip() for item in models if item.get("key")]
+        if keys and not self.lm_model_edit.text().strip():
+            self.lm_model_edit.setText(keys[0])
+        loaded = []
+        for item in models:
+            loaded.extend(str(value) for value in item.get("loaded_instances") or [])
+        if loaded and not self.lm_instance_edit.text().strip():
+            self.lm_instance_edit.setText(loaded[0])
+        self.log(f"LM Studio 已发现 {len(keys)} 个视觉模型。")
+
+    def load_lm_model(self) -> None:
+        worker = LmStudioLoadWorker(
+            self.lm_url_edit.text().strip(),
+            self.lm_model_edit.text().strip(),
+            str(self.lm_profile_box.currentData() or "low_vram"),
+        )
+        worker.succeeded.connect(self._lm_model_loaded)
+        worker.failed.connect(lambda message: self.log(f"LM Studio 加载失败：{message}"))
+        self.lm_load_button.setEnabled(False)
+        worker.finished.connect(lambda: self.lm_load_button.setEnabled(True))
+        self.log("正在加载 LM Studio 模型…")
+        self._track_aux_worker(worker)
+
+    def _lm_model_loaded(self, result: dict[str, Any]) -> None:
+        self.lm_instance_edit.setText(str(result.get("instance_id") or ""))
+        self.log(f"LM Studio 模型已加载：{result.get('instance_id', '')}")
+
+    def unload_lm_model(self) -> None:
+        worker = LmStudioUnloadWorker(
+            self.lm_url_edit.text().strip(), self.lm_instance_edit.text().strip()
+        )
+        worker.succeeded.connect(lambda _result: self._lm_model_unloaded())
+        worker.failed.connect(lambda message: self.log(f"LM Studio 卸载失败：{message}"))
+        self.lm_unload_button.setEnabled(False)
+        worker.finished.connect(lambda: self.lm_unload_button.setEnabled(True))
+        self.log("正在卸载 LM Studio 模型…")
+        self._track_aux_worker(worker)
+
+    def _lm_model_unloaded(self) -> None:
+        self.lm_instance_edit.clear()
+        self.log("LM Studio 模型已卸载。")
 
     def apply_preset(self, label: str) -> None:
         presets = {
@@ -692,8 +805,8 @@ class ModernMainWindow(QMainWindow):
             "llama_server_path": self.llama_server_edit.text().strip(),
             "llama_model_path": self.llama_model_edit.text().strip(),
             "llama_mmproj_path": self.llama_mmproj_edit.text().strip(),
-            "llama_context_length": int(self.settings.get("llama_context_length", core.LLAMA_CPP_DEFAULT_CONTEXT_LENGTH)),
-            "llama_gpu_layers": int(self.settings.get("llama_gpu_layers", core.LLAMA_CPP_DEFAULT_GPU_LAYERS)),
+            "llama_context_length": self.llama_context.value(),
+            "llama_gpu_layers": self.llama_gpu_layers.value(),
             "labeling_focus": str(self.settings.get("labeling_focus", "subject")),
             "output_language": str(self.settings.get("output_language", "zh")),
             "trigger_word": str(self.settings.get("trigger_word", "")),
@@ -791,39 +904,67 @@ class ModernMainWindow(QMainWindow):
     def log(self, text: str) -> None:
         self.log_edit.appendPlainText(text)
 
+    def _selected_paths(self) -> list[Path]:
+        values = [item.data(Qt.ItemDataRole.UserRole) for item in self.material_list.selectedItems()]
+        selected = [Path(value) for value in values if value]
+        return selected or list(self.media_paths[:1])
+
+    def save_current_result(self) -> None:
+        paths = self._selected_paths()
+        caption = self.result_edit.toPlainText().strip()
+        if not paths:
+            QMessageBox.information(self, "没有目标素材", "请先扫描或选择一个素材。")
+            return
+        if not caption:
+            QMessageBox.information(self, "结果为空", "当前结果为空，无法保存。")
+            return
+        core.write_caption(paths[0], caption)
+        self.log(f"已保存标注：{paths[0].name}（TXT 已覆盖写入）")
+        self.statusBar().showMessage("标注结果已保存", 3000)
+
+    def export_captions(self, kind: str) -> None:
+        if not self.media_paths or self.current_folder is None:
+            QMessageBox.information(self, "没有素材", "请先选择目录并扫描素材。")
+            return
+        suffix = ".jsonl" if kind == "jsonl" else ".csv"
+        destination, _ = QFileDialog.getSaveFileName(
+            self, "导出标注", str(self.current_folder / f"captions{suffix}"),
+            "JSONL (*.jsonl)" if kind == "jsonl" else "CSV (*.csv)",
+        )
+        if not destination:
+            return
+        count = (
+            core.export_jsonl(self.media_paths, Path(destination), self.current_folder)
+            if kind == "jsonl"
+            else core.export_csv(self.media_paths, Path(destination), self.current_folder)
+        )
+        self.log(f"已导出 {count} 条标注：{destination}")
+
+    def check_updates(self) -> None:
+        worker = UpdateCheckWorker()
+        worker.succeeded.connect(self._update_checked)
+        worker.failed.connect(lambda message: self.log(f"检查更新失败：{message}"))
+        self.update_button.setEnabled(False)
+        worker.finished.connect(lambda: self.update_button.setEnabled(True))
+        self.log("正在检查 GitHub 最新版本…")
+        self._track_aux_worker(worker)
+
+    def _update_checked(self, release: dict[str, Any]) -> None:
+        tag = str(release.get("tag") or release.get("name") or "未知版本")
+        if release.get("is_newer"):
+            self.system_info.setHtml(
+                f"<h2>发现新版本 {tag}</h2>"
+                "<p>当前是演示架构版本，更新前请先保存任务和设置。</p>"
+                "<p>稳定版仍可通过经典工作台执行应用内覆盖安装。</p>"
+            )
+            self.log(f"发现新版本：{tag}，请在经典工作台执行覆盖安装。")
+        else:
+            self.log(f"当前已是最新版本（当前 {APP_VERSION}，远端 {tag}）。")
+        self.statusBar().showMessage("更新检查完成", 3000)
+
     # ----- theme / migration --------------------------------------------
     def _qss(self, theme: dict[str, str]) -> str:
-        return f"""
-        QWidget#root, QMainWindow {{ background: {theme['window']}; color: {theme['text']}; }}
-        QFrame#header, QFrame#card, QGroupBox#card {{ background: {theme['surface']}; border: 1px solid {theme['border']}; border-radius: 12px; }}
-        QGroupBox#card {{ margin-top: 12px; padding: 18px 10px 10px 10px; }}
-        QGroupBox#card::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; color: {theme['text']}; }}
-        QLabel {{ color: {theme['text']}; }}
-        QLabel#muted {{ color: {theme['muted']}; }}
-        QLabel#badge {{ background: {theme['accent_soft']}; color: {theme['accent']}; border-radius: 9px; padding: 5px 10px; font-weight: 600; }}
-        QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QSpinBox, QDoubleSpinBox {{ background: {theme['input']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 8px; padding: 7px 9px; selection-background-color: {theme['accent']}; }}
-        QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {theme['accent']}; padding: 6px 8px; }}
-        QComboBox::drop-down {{ border: 0; width: 28px; }}
-        QPushButton {{ background: {theme['surface_alt']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 8px; padding: 8px 12px; }}
-        QPushButton:hover {{ border-color: {theme['accent']}; }}
-        QPushButton#primary {{ background: {theme['accent']}; color: #fffaf4; border: 0; font-weight: 700; }}
-        QPushButton:disabled {{ color: {theme['muted']}; background: {theme['surface_alt']}; }}
-        QListWidget {{ background: {theme['input']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 10px; padding: 6px; }}
-        QListWidget::item {{ padding: 9px 8px; border-radius: 6px; }}
-        QListWidget::item:selected {{ background: {theme['accent_soft']}; color: {theme['text']}; }}
-        QTabWidget::pane {{ border: 1px solid {theme['border']}; border-radius: 8px; background: {theme['input']}; }}
-        QTabBar::tab {{ background: {theme['surface_alt']}; color: {theme['text']}; padding: 8px 14px; margin-right: 2px; border-radius: 6px; }}
-        QTabBar::tab:selected {{ background: {theme['accent']}; color: #fffaf4; }}
-        QToolBar {{ background: {theme['surface']}; border: 0; spacing: 6px; padding: 5px; }}
-        QToolButton {{ color: {theme['text']}; padding: 6px 9px; border-radius: 6px; }}
-        QToolButton:hover {{ background: {theme['accent_soft']}; }}
-        QProgressBar {{ background: {theme['surface_alt']}; border: 0; border-radius: 6px; text-align: center; color: {theme['text']}; }}
-        QProgressBar::chunk {{ background: {theme['accent']}; border-radius: 6px; }}
-        QScrollBar:vertical {{ background: {theme['surface_alt']}; width: 12px; margin: 2px; }}
-        QScrollBar::handle:vertical {{ background: {theme['border']}; min-height: 32px; border-radius: 6px; }}
-        QSplitter::handle {{ background: {theme['border']}; width: 5px; }}
-        QStatusBar {{ background: {theme['surface']}; color: {theme['muted']}; border-top: 1px solid {theme['border']}; }}
-        """
+        return build_stylesheet(theme)
 
     def apply_theme(self, theme_name: str) -> None:
         self.current_theme = theme_name if theme_name in THEMES else "night"

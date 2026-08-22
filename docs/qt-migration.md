@@ -1,4 +1,4 @@
-# PySide6 现代 GUI 迁移说明
+# PySide6 现代 GUI 迁移说明（v3.6.demo）
 
 ## 为什么采用渐进迁移
 
@@ -31,3 +31,5 @@
 ```
 
 `--smoke-test` 只验证三列界面、后端选项和本地运行方式，不访问网络、不读取模型权重，也不会产生 API 费用。
+
+演示构建使用 `MediaCaptionTool-3.6.demo-Qt.spec`。固定文件版本保持数字形式 `3.6.0.0` 以兼容 Windows，界面与产品版本显示为 `3.6.demo`。`MediaCaptionTool-3.6.demo.spec` 仍用于构建经典 Tk 回退版。

@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 [![Tests](https://img.shields.io/badge/Tests-99%20passed-35B46F)](./tests)
-[![Version](https://img.shields.io/badge/Release-v3.6.6-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
+[![Version](https://img.shields.io/badge/Demo-v3.6.demo-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
 
@@ -268,7 +268,10 @@ Qt 入口提供三列工作区、平台设置、采样参数、拖放素材、�
 ├── media_caption_worker.py       # 按需媒体 Worker、安全通信与 FFmpeg 接口
 ├── media_caption_tool_v3.py      # Tkinter 桌面工作台
 ├── media_caption_qt.py           # 可选 PySide6 现代 GUI 迁移入口
+├── qt_ui/                         # Qt 主题、控件和后台任务适配层
 ├── MediaCaptionTool-3.6.6.spec   # PyInstaller 单文件构建
+├── MediaCaptionTool-3.6.demo.spec # Qt 迁移阶段演示构建配置
+├── MediaCaptionTool-3.6.demo-Qt.spec # Qt 演示 EXE 构建配置
 ├── CHANGELOG.md                  # 每次公开版本的完整更新记录
 ├── SECURITY.md                   # 凭据、模板、本地数据与发布边界
 ├── requirements.txt              # 基础依赖
