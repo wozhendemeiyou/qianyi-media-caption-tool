@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import socket
@@ -68,7 +69,18 @@ def find_media_tool(name: str) -> Path | None:
             if candidate.is_file():
                 return candidate.resolve()
     discovered = shutil.which(name)
-    return Path(discovered).resolve() if discovered else None
+    if discovered:
+        return Path(discovered).resolve()
+    if name == "ffmpeg":
+        try:
+            import imageio_ffmpeg
+
+            bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
+            if bundled.is_file():
+                return bundled.resolve()
+        except (ImportError, OSError, RuntimeError):
+            pass
+    return None
 
 
 def media_tool_status() -> dict[str, Any]:
@@ -172,9 +184,10 @@ class MediaEngine:
             "protocol": WORKER_PROTOCOL_VERSION,
             "pid": os.getpid(),
             "capabilities": {
-                "probe": bool(self.ffprobe),
-                "frames": bool(self.ffmpeg and self.ffprobe),
+                "probe": bool(self.ffprobe or self.ffmpeg),
+                "frames": bool(self.ffmpeg),
                 "audio": bool(self.ffmpeg),
+                "trim": bool(self.ffmpeg),
             },
             "tools": {
                 "ffmpeg": str(self.ffmpeg or ""),
@@ -183,9 +196,11 @@ class MediaEngine:
         }
 
     def probe(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self.ffprobe is None:
-            raise MediaToolUnavailable("未检测到 FFprobe；请安装 FFmpeg 或随软件打包媒体组件")
         source = self._input_path(payload.get("path"))
+        if self.ffprobe is None:
+            if self.ffmpeg is None:
+                raise MediaToolUnavailable("未检测到 FFmpeg 媒体组件")
+            return self._probe_with_ffmpeg(source)
         result = self._run(
             [
                 str(self.ffprobe),
@@ -219,9 +234,53 @@ class MediaEngine:
             "audio_streams": [stream for stream in streams if stream.get("codec_type") == "audio"],
         }
 
+    def _probe_with_ffmpeg(self, source: Path) -> dict[str, Any]:
+        assert self.ffmpeg is not None
+        try:
+            result = subprocess.run(
+                [str(self.ffmpeg), "-hide_banner", "-i", str(source)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                creationflags=_creation_flags(),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise MediaWorkerError("读取视频信息超时") from error
+        detail = f"{result.stdout}\n{result.stderr}"
+        duration_match = re.search(
+            r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+            detail,
+            flags=re.IGNORECASE,
+        )
+        duration = 0.0
+        if duration_match:
+            duration = (
+                int(duration_match.group(1)) * 3600
+                + int(duration_match.group(2)) * 60
+                + float(duration_match.group(3))
+            )
+        has_video = bool(re.search(r"Stream .*Video:", detail, flags=re.IGNORECASE))
+        has_audio = bool(re.search(r"Stream .*Audio:", detail, flags=re.IGNORECASE))
+        if not has_video and not has_audio:
+            raise MediaWorkerError("FFmpeg 无法识别该媒体文件")
+        format_match = re.search(r"Input #0,\s*([^,]+)", detail)
+        return {
+            "path": str(source),
+            "duration": duration,
+            "size": source.stat().st_size,
+            "format": format_match.group(1).strip() if format_match else "",
+            "video_streams": [{"codec_type": "video"}] if has_video else [],
+            "audio_streams": [{"codec_type": "audio"}] if has_audio else [],
+        }
+
     def extract_frames(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self.ffmpeg is None or self.ffprobe is None:
-            raise MediaToolUnavailable("视频抽帧需要 FFmpeg 与 FFprobe")
+        if self.ffmpeg is None:
+            raise MediaToolUnavailable("视频抽帧需要 FFmpeg")
         source = self._input_path(payload.get("path"))
         output_dir = self._output_path(payload.get("output_dir"), directory=True)
         frame_count = max(1, min(32, int(payload.get("frame_count") or 8)))
@@ -256,6 +315,119 @@ class MediaEngine:
         return {
             "frames": [str(path) for path in frames],
             "duration": duration,
+        }
+
+    def trim_video(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.ffmpeg is None:
+            raise MediaToolUnavailable("视频片段截取需要 FFmpeg")
+        source = self._input_path(payload.get("path"))
+        output_path = self._output_path(payload.get("output_path"))
+        if output_path.suffix.casefold() != ".mp4":
+            raise MediaWorkerError("视频片段输出必须使用 MP4 格式")
+        probe = self.probe({"path": str(source)})
+        has_video = bool(probe.get("video_streams"))
+        has_audio = bool(probe.get("audio_streams"))
+        if not has_video and not has_audio:
+            raise MediaWorkerError("文件中没有可用的音频或视频流")
+        include_audio = bool(payload.get("include_audio", True))
+        duration = max(0.0, float(probe.get("duration") or 0.0))
+        if duration <= 0:
+            raise MediaWorkerError("无法读取视频时长")
+        start_seconds = max(0.0, min(duration, float(payload.get("start") or 0.0)))
+        end_seconds = max(
+            start_seconds,
+            min(duration, float(payload.get("end") or duration)),
+        )
+        clip_duration = end_seconds - start_seconds
+        if clip_duration < 0.25:
+            raise MediaWorkerError("所选视频片段不能短于 0.25 秒")
+        if has_video:
+            arguments = [
+                str(self.ffmpeg),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                f"{start_seconds:.3f}",
+                "-i",
+                str(source),
+                "-t",
+                f"{clip_duration:.3f}",
+                "-map",
+                "0:v:0",
+                "-sn",
+                "-dn",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-movflags",
+                "+faststart",
+                "-avoid_negative_ts",
+                "make_zero",
+            ]
+            if include_audio and has_audio:
+                arguments[arguments.index("-sn"):arguments.index("-sn")] = [
+                    "-map",
+                    "0:a?",
+                ]
+                arguments.extend(["-c:a", "aac"])
+            else:
+                arguments.append("-an")
+            arguments.append(str(output_path))
+        else:
+            arguments = [
+                str(self.ffmpeg),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                f"{start_seconds:.3f}",
+                "-i",
+                str(source),
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=#24332d:s=1280x720:r=25",
+                "-t",
+                f"{clip_duration:.3f}",
+                "-map",
+                "1:v:0",
+                "-map",
+                "0:a:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "22",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        self._run(
+            arguments,
+            timeout=max(90.0, min(1800.0, clip_duration * 4.0)),
+        )
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            raise MediaWorkerError("视频片段未生成有效文件")
+        return {
+            "path": str(output_path),
+            "source": str(source),
+            "start": start_seconds,
+            "end": end_seconds,
+            "duration": clip_duration,
+            "source_type": "video" if has_video else "audio",
+            "audio_included": bool(has_audio and (include_audio or not has_video)),
         }
 
     def extract_audio(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -350,6 +522,8 @@ def serve_worker(port: int, token: str, allowed_roots: Iterable[Path]) -> int:
                     result = engine.probe(payload)
                 elif self.path == "/extract-frames":
                     result = engine.extract_frames(payload)
+                elif self.path == "/trim-video":
+                    result = engine.trim_video(payload)
                 elif self.path == "/extract-audio":
                     result = engine.extract_audio(payload)
                 elif self.path == "/shutdown":
@@ -556,6 +730,28 @@ class MediaWorkerController:
             timeout=timeout,
         )
         return Path(str(result.get("audio") or output_path))
+
+    def trim_video(
+        self,
+        path: Path,
+        output_path: Path,
+        start_seconds: float,
+        end_seconds: float,
+        include_audio: bool = True,
+        timeout: float = 1800.0,
+    ) -> Path:
+        result = self.request(
+            "/trim-video",
+            {
+                "path": str(path),
+                "output_path": str(output_path),
+                "start": float(start_seconds),
+                "end": float(end_seconds),
+                "include_audio": bool(include_audio),
+            },
+            timeout=timeout,
+        )
+        return Path(str(result.get("path") or output_path))
 
     def _terminate_locked(self) -> None:
         process = self.process

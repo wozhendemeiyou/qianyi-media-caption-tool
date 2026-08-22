@@ -37,6 +37,11 @@ credentials-*.bin
 .env.*
 *.log
 
+# Local GUI diagnostic captures
+debug-theme-capture.png
+diag-*.png
+diagnostic-*.png
+
 # IDE and OS files
 .idea/
 .vscode/

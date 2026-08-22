@@ -4,8 +4,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011-0078D4?logo=windows)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
-[![Tests](https://img.shields.io/badge/Tests-89%20passed-35B46F)](./tests)
-[![Version](https://img.shields.io/badge/Release-v3.6.4-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
+[![Tests](https://img.shields.io/badge/Tests-99%20passed-35B46F)](./tests)
+[![Version](https://img.shields.io/badge/Release-v3.6.6-285C96)](https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/latest)
 
 > 公开仓库与 Release 已清空 API Key、自定义接口值、用户提示词和提示词预设。用户在软件内填写的密钥使用 Windows DPAPI 分平台加密，只保存在当前 Windows 账户的本地应用目录。
 
@@ -46,15 +46,16 @@
 | 一次扫描，完整配对 | 递归发现图片、视频和同名 TXT，立即区分缺少标签、无效标签、孤立 TXT、不可读媒体与输出冲突。 |
 | 面向训练目标的提示策略 | 可选择训练主体、风格 LoRA 或风景/场景侧重点，支持中文自然语言、英文描述和逗号词组标签。 |
 | 双层提示词编辑 | 用户要求与系统提示词模板分区编辑；公开版不内置模板，用户自行编写或导入并只保存在本机。 |
-| 画布优先导航 | 左侧固定显示项目中心、图像打标、视频反推、平台设置，中央素材画布不再被低频参数挤占。 |
+| 画布优先导航 | 左侧固定显示项目中心、图像打标、视频反推、单次反推、平台设置和系统说明，中央素材画布不再被低频参数挤占。 |
 | 视频反推入口 | 视频任务拥有独立顶栏入口和任务状态，继续复用可靠的扫描、批处理、停止与恢复主线。 |
+| 独立单次反推 | 无需创建项目即可拖入、上传或粘贴一张图片；音视频可在内嵌编辑器中手工选择起止位置、预览、仅保存或截取后反推。单次结果可编辑、复制和另存，不改写当前批量项目。 |
 | 折叠采样面板 | 任务设置中可展开 Max Tokens、Temperature、Top P、Top K、频率/存在惩罚和 Seed，并提供稳定、平衡、创意三组预设。 |
 | 安全滚轮交互 | 关闭状态的下拉框与数值框不响应滚轮改值；滚轮继续用于右侧设置区或已展开选项列表的浏览。 |
 | 双模式检查器 | 右侧在当前素材和任务设置间切换；当前素材内集中复核标注结果、提示词和运行日志。 |
 | 固定任务栏 | 开始、停止、重试、处理选中、批处理、导出、进度和统计始终固定在窗口底部。 |
 | 系统说明与更新 | 内置功能说明、当前版本和更新日志；发现新版本后可在软件内下载、校验、覆盖并自动重启。 |
 | 多 API 平台 | 内置火山引擎、OpenAI、Google、月之暗面、千问和 SiliconFlow，并支持用户填写 OpenAI 兼容 Base URL、模型 ID 与 API Key。 |
-| 双本地运行方式 | 本地后端可选择 Hugging Face 模型目录或 LM Studio 本地服务；LM Studio 提供视觉模型下拉列表及一键加载/卸载。 |
+| 三种本地运行方式 | 本地后端可选择 Hugging Face 模型目录、LM Studio 本地服务或 llama.cpp 原生 GGUF；GGUF 模式自动管理 llama-server 生命周期。 |
 | 推理输出控制 | 平台设置提供 MTP 加速与思考标签清理滑块；兼容本地模型可启用原生 MTP，所有后端均可清理最终标注中的思考区块。 |
 | 常驻硬件状态 | 底部持续显示 CPU、内存和 NVIDIA GPU 利用率/显存；采集在后台线程中完成，不阻塞界面。 |
 | 可恢复的批处理 | 跳过已有有效 TXT，失败项独立记录并可重试；停止任务后再次运行不会浪费已经完成的结果。 |
@@ -68,9 +69,11 @@
 
 ## 典型工作流
 
+只想临时处理一个素材时，可从项目中心或左侧导航直接进入“单次反推”：图片支持拖放、点击选择和 `Ctrl+V` 粘贴；音视频支持手工选择片段，原文件不会被修改。
+
 1. 在项目中心添加一个媒体目录。
 2. 进入图像打标或视频反推，在右侧“任务设置”中选择输出格式、语言、训练侧重点、触发词和并发数。
-3. 在“平台设置”中选择外部 API、Hugging Face 本地目录或 LM Studio 本地服务；内置 API 的 Base URL 由系统提供。
+3. 在“平台设置”中选择外部 API、Hugging Face 本地目录、LM Studio 本地服务或 llama.cpp 原生 GGUF；内置 API 的 Base URL 由系统提供。
 4. 在提示词页自行编写或导入系统模板，并按任务需要填写用户要求。公开版首次启动时模板库为空。
 5. 点击“扫描”，先处理缺少 TXT、无效 TXT、孤立 TXT 和重名输出冲突。
 6. 点击“开始任务”或只处理当前筛选/选中的素材。
@@ -110,6 +113,8 @@ dataset/
 
 ### 视频与采样
 
+- “单次反推 → 音视频”提供内嵌片段编辑器，可读取时长与轨道、显示抽帧时间轴、保留或移除视频音轨，并支持播放选区、仅截取保存和截取后反推。
+- MP3、WAV、M4A、AAC、FLAC 和 OGG 音频可手工截取；选区会在本机封装为带静态画面的 MP4，再交给兼容视频输入的平台处理。
 - 火山引擎支持 20 MB 内视频直传，以及最大 512 MB 的文件上传与预处理流程。
 - 火山引擎与千问支持视频输入；其他平台的实际能力取决于所选视觉模型。
 - 视频任务按需启动独立媒体 Worker。检测到 FFprobe 时会先验证视频流和容器完整性；没有媒体工具时安全降级为平台原生视频输入。
@@ -177,11 +182,11 @@ python -m venv .venv312
 
 首次使用时进入“平台设置”，选择运行后端、服务商和模型并填写自己的 Key；随后在“提示词”页编写或导入自己的系统模板。仓库没有示例 Key、示例模板，也不需要创建包含明文 Key 的配置文件。
 
-视频完整性检查、抽帧和音频提取需要 FFmpeg。源码运行时可将 `ffmpeg`、`ffprobe` 加入 `PATH`，或将 `ffmpeg.exe`、`ffprobe.exe` 放入 `assets/media/`。未安装时图片功能和平台原生视频输入不受影响。
+视频完整性检查、抽帧、音视频片段截取和音频封装使用 FFmpeg。基础依赖会提供可用的 FFmpeg 运行时；也可以将 `ffmpeg`、`ffprobe` 加入 `PATH`，或将对应程序放入 `assets/media/`。缺少媒体工具时图片功能和平台原生视频输入不受影响，但片段编辑器不可用。
 
 ## 本地模型
 
-“外部 API / 本地模型”可在任务开始前切换。本地后端目前支持图片，视频仍使用外部 API，并提供两种运行方式：
+“外部 API / 本地模型”可在任务开始前切换。本地后端目前支持图片，视频仍使用外部 API，并提供三种运行方式：
 
 - **Hugging Face 本地目录**：加载用户指定目录中的视觉语言模型，目录必须包含 `config.json`。支持 Accelerate 自动设备分配和低内存加载；同一模型实例的生成阶段会串行保护，避免多线程同时争抢显存，文件读取与预处理仍可并行。
 - **LM Studio 本地服务**：默认连接 `http://localhost:1234/v1`。点击“刷新列表”读取已下载的视觉模型，从只读下拉框选择后点击“加载模型”；加载成功后按钮自动切换为“卸载模型”，卸载时会清除该模型的全部已加载实例。不需要选择 Hugging Face 目录或填写 API Key。
@@ -190,9 +195,13 @@ python -m venv .venv312
 - LM Studio 图片请求会将最长边限制为 1280 像素以降低视觉 tokens 和显存压力；若后端进程退出、显存不足、只返回思考内容或输出被截断，工作台会显示对应中文原因且不写入 TXT。
 - 若模型连续返回 `?`、替换字符或单一重复字符，任务会明确提示先恢复 LM Studio 默认或已验证的加载/采样参数；仍异常时再检查模型、Tokenizer、量化文件与 mmproj，不会把退化输出写入 TXT。
 
-两种本地方式的并发数都由用户在任务设置中决定。界面会持续提示显存与内存风险，建议先使用 1，并根据硬件资源和模型稳定性逐步提高。
+- **llama.cpp 原生 GGUF**：选择 `llama-server.exe`、GGUF 主模型和匹配的 `mmproj*.gguf`。任务开始时工作台自动分配本地端口并启动 llama-server，任务结束、停止或启动失败时自动关闭；上下文长度和 GPU 层数可在平台设置中调整。该模式不依赖 LM Studio，也不会产生 API 费用。
 
-- “启用 MTP”仅对 Hugging Face 模式中包含原生 MTP 预测层、且当前 Transformers 版本支持 `use_mtp` 的本地模型生效；不兼容时自动使用普通生成。LM Studio 与云 API 的推理加速由服务端管理。
+使用该模式前，请准备与显卡/CPU 匹配的 Windows llama.cpp 发行包，并在平台设置中选择其中的 `llama-server.exe`。主模型和 `mmproj` 应来自同一视觉模型版本；选择主模型后，若同目录只有一个 `mmproj*.gguf`，工作台会自动填入它。
+
+三种本地方式的并发数都由用户在任务设置中决定。界面会持续提示显存与内存风险，建议先使用 1，并根据硬件资源和模型稳定性逐步提高。
+
+- “启用 MTP”仅对 Hugging Face 模式中包含原生 MTP 预测层、且当前 Transformers 版本支持 `use_mtp` 的本地模型生效；不兼容时自动使用普通生成。LM Studio 与 llama.cpp 的推理加速由各自运行时管理。
 - “移除思考标签”默认开启：兼容平台会尽量关闭思考输出，客户端还会清除 `<think>`、`<thinking>`、`<analysis>` 与 `<reasoning>` 区块，避免训练 TXT 混入推理过程。
 
 根据显卡环境安装 PyTorch 后，再安装本地模型依赖：
@@ -206,6 +215,8 @@ python -m venv .venv312
 ## 测试与压力验证
 
 所有自动化测试和压力测试均使用模拟接口，不访问付费 API。
+
+当前版本共 99 项自动化测试通过，并额外使用真实 FFmpeg 验证带音轨视频、静音视频和纯音频片段输出。
 
 ```powershell
 .\.venv312\Scripts\python.exe -m unittest discover -s tests -v
@@ -229,7 +240,7 @@ python -m venv .venv312
 ## 构建 Windows EXE
 
 ```powershell
-.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.4.spec
+.\.venv312\Scripts\pyinstaller.exe --noconfirm MediaCaptionTool-3.6.6.spec
 ```
 
 构建配置只收集运行所需代码与视觉资源，不打入 API Key、用户设置、项目记录或本地模型权重。如果存在 `assets/media/`，构建时会一并收集 FFmpeg 媒体组件。
@@ -245,7 +256,7 @@ python -m venv .venv312
 ├── media_caption_core.py         # 扫描、模型路由、HTTP、日志与批任务
 ├── media_caption_worker.py       # 按需媒体 Worker、安全通信与 FFmpeg 接口
 ├── media_caption_tool_v3.py      # Tkinter 桌面工作台
-├── MediaCaptionTool-3.6.4.spec   # PyInstaller 单文件构建
+├── MediaCaptionTool-3.6.6.spec   # PyInstaller 单文件构建
 ├── CHANGELOG.md                  # 每次公开版本的完整更新记录
 ├── SECURITY.md                   # 凭据、模板、本地数据与发布边界
 ├── requirements.txt              # 基础依赖

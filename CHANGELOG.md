@@ -2,8 +2,31 @@
 
 本文件记录芊熠智能打标工作台每个公开版本的主要变化。日期均使用北京时间。
 
+## [3.6.6] - 2026-08-22
+
+- 发布当前稳定版，统一应用、Windows 文件资源、构建 spec、README 与 Release 文档的版本号为 `3.6.6`。
+- 延续并固化 `llama.cpp 原生 GGUF`、LM Studio、Hugging Face 与外部 API 四条推理路径，旧版配置可平滑迁移。
+- 保留三列工作区、单次反推、音视频片段编辑、采样参数、主题切换、运行日志、更新检查和本地模型管理等现有功能。
+- 发布前完成源码语法检查、核心/Worker/GUI 回归测试和冻结版 EXE smoke test。
+
+## [3.6.5] - 2026-08-19
+
+- 新增 `llama.cpp 原生 GGUF` 本地运行方式，可选择 `llama-server.exe`、GGUF 主模型和匹配的 `mmproj`，不经过 LM Studio。
+- GGUF 任务会自动分配本地端口、启动和清理 llama-server，并将服务器日志写入本机应用数据目录；支持上下文长度、GPU 层数和模型别名。
+- 选择主模型后，同目录只有一个 `mmproj*.gguf` 时自动关联；Hugging Face 与 LM Studio 本地运行方式保持兼容。
+- 设置架构升级为 14，新增 llama.cpp 配置持久化和异常配置恢复。
+- 补充单次反推、媒体片段编辑、音视频截取及本地视觉模型回归验证，公开版继续不包含 API Key、提示词模板或用户本地设置。
+
 ## [3.6.4] - 2026-08-16
 
+- 新增 `llama.cpp 原生 GGUF` 本地运行方式：可选择 `llama-server.exe`、GGUF 主模型和匹配的 `mmproj`，任务开始时自动启动本地服务，结束、取消或失败时自动清理。
+- GGUF 模式支持上下文长度、GPU 层数和模型别名设置，自动保存配置并将 llama.cpp 服务器日志写入本机诊断目录；Hugging Face 与 LM Studio 路径保持不变。
+- 新增独立“单次反推”工作区，可从项目中心或左侧导航直接进入，无需创建或切换项目。
+- 单张图片支持点击选择、拖放和 `Ctrl+V` 粘贴；生成结果可编辑、复制和另存，单次任务不会改写原图片旁的 TXT，也不会清空当前批量项目。
+- 新增内嵌音视频片段编辑器：读取媒体时长与轨道、抽帧时间轴、手工起止滑块、保留音轨、播放选区、仅截取保存及截取后反推。
+- 新增 MP3、WAV、M4A、AAC、FLAC 与 OGG 单次输入；纯音频选区会在本机封装为带静态画面的 MP4，以复用兼容视频输入的视觉模型流程。
+- 单次任务拥有独立进度、状态、耗时、字数和速度反馈，与批量扫描、项目列表、当前目录和图像/视频模式完全隔离。
+- 新增日光/夜光画布回归、单次任务隔离、拖放/粘贴、媒体选区约束、音频封装及真实 FFmpeg 音视频截取验证；自动化测试增至 99 项。
 - LM Studio 新增“低显存安全 / 纯 CPU / 沿用预设”三种加载策略；默认通过本机 CLI 明确应用 10% GPU Offload、8192 上下文、并行 1 与关闭 MTP，避免一键加载继续复用危险的旧显存预设。
 - 模型列表会读取并显示真实实例配置、推理能力、模型大小与加载状态，不再只判断是否存在实例。
 - LM Studio 的 Temperature、Top P 和 Seed 等采样设置继续由服务端接管；工作台的打标输出安全上限调整为 768 tokens，保留思考时放宽至 1536 tokens。
@@ -12,12 +35,12 @@
 - `HTTP 400 {"error":"terminated"}`、显存不足、服务未启动、思考预算耗尽与截断输出现在均提供明确中文原因，异常结果不会写入 TXT。
 - Hugging Face 多并发推理增加生成锁，避免同一模型实例被多个线程同时争抢 KV Cache；文件读取和图片预处理仍可并行。
 - Hugging Face 大模型改用 Accelerate 自动设备分配与低内存加载，支持 GPU/CPU 安全拆分；补充显存不足提示、思考关闭参数、编码器—解码器输出裁剪修复及任务结束后的显存缓存释放。
-- 设置架构升级为 13，新增 LM Studio 加载策略持久化与异常配置恢复。
+- 设置架构升级为 14，新增 LM Studio 加载策略与 llama.cpp GGUF 路径、上下文和 GPU 层数持久化，并保留异常配置恢复。
 - 使用 Qwen3.8-27B 对同一失败图片真机验证：不再出现 `terminated`，思考 tokens 降为 0，处理耗时由约 239.7 秒降低至约 99.9 秒。
 - 修复窗口最小化后恢复或从普通尺寸切换到最大化时，缩略图画布销毁并重建全部卡片造成的整块屏闪；尺寸变化现在只会原位调整现有卡片行列。
 - 顶栏与筛选栏加入响应式布局状态缓存，并取消切换布局前的批量隐藏；窗口恢复期间暂停重复主题补刷，图标和控件不再无意义地消失重现。
 - 右侧预览加入源图片与目标尺寸缓存，相同素材和尺寸不再从磁盘重新解码；最小化产生的无效尺寸事件会被忽略。
-- 自动化测试增至 91 项，GUI 自检、公开发布安全扫描及冻结版 EXE 启动检查全部通过。
+- GUI 自检、公开发布安全扫描及冻结版 EXE 启动检查全部通过。
 
 ## [3.6.3] - 2026-08-16
 
@@ -138,6 +161,8 @@
 - API Key 使用 Windows DPAPI 加密，本地视觉语言模型可选单并发运行。
 - 44 项自动化测试与标准离线压力测试通过。
 
+[3.6.6]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.6
+[3.6.5]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.5
 [3.6.4]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.4
 [3.6.3]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.3
 [3.6.2]: https://github.com/wozhendemeiyou/qianyi-media-caption-tool/releases/tag/v3.6.2

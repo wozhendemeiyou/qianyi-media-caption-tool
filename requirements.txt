@@ -1,4 +1,6 @@
 Pillow==12.3.0
 pillow-heif==1.4.0
 requests==2.34.2
+tkinterdnd2==0.6.2
+imageio-ffmpeg==0.6.0
 PyInstaller==6.21.0

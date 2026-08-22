@@ -187,10 +187,11 @@ class GuiTests(unittest.TestCase):
         with mock.patch.object(gui.sys, "platform", "win32"):
             app._use_fullscreen_launch_window()
 
-        root.withdraw.assert_called_once_with()
-        root.overrideredirect.assert_called_once_with(True)
-        root.minsize.assert_called_once_with(1900, 1080)
-        root.geometry.assert_called_once_with("1900x1080+330+180")
+        root.overrideredirect.assert_called_once_with(False)
+        self.assertEqual((1440, 820), root.minsize.call_args_list[-1].args)
+        self.assertEqual(
+            "1440x820+560+310", root.geometry.call_args_list[-1].args[0]
+        )
         root.configure.assert_called_once_with(background="#090d1d")
         root.wm_attributes.assert_any_call("-topmost", True)
 
@@ -551,6 +552,8 @@ class GuiTests(unittest.TestCase):
             try:
                 app.folder_var.set(str(root_path))
                 app._handle_scan(core.scan_media(root_path, "image"))
+                self.assertEqual({"missing": 1, "invalid": 0}, app.caption_health_counts)
+                self.assertIn("缺 1", app.stats_var.get())
                 app.filter_var.set("缺少 TXT")
                 app.refresh_table()
                 self.assertEqual([missing], [item["path"] for item in app.gallery.items])
@@ -562,6 +565,8 @@ class GuiTests(unittest.TestCase):
 
                 core.write_caption(missing, "new caption")
                 app._set_item(missing, "success", "new caption")
+                self.assertEqual({"missing": 0, "invalid": 0}, app.caption_health_counts)
+                self.assertIn("缺 0", app.stats_var.get())
                 self.assertEqual([], app.gallery.items)
 
                 app.filter_var.set("全部状态")
@@ -902,6 +907,38 @@ class GuiTests(unittest.TestCase):
                 )
                 self.assertIs(app.prompt_tab, app.preset_box.master.master)
 
+                long_prompt = "\n".join(
+                    f"第 {index:03d} 行：完整提示词模板内容"
+                    for index in range(1, 301)
+                )
+                app.settings["prompt_presets"] = {"长模板": long_prompt}
+                app.preset_box["values"] = ["长模板"]
+                app.preset_var.set("长模板")
+                app.apply_preset()
+                root.update_idletasks()
+                root.update()
+
+                self.assertEqual(
+                    long_prompt,
+                    app.system_prompt_text.get("1.0", "end-1c"),
+                )
+                self.assertEqual("1.0", app.system_prompt_text.index(tk.INSERT))
+                self.assertEqual(0.0, app.system_prompt_text.yview()[0])
+                self.assertEqual(
+                    f"完整加载 · {len(long_prompt):,} 字符 · 300 行",
+                    app.system_prompt_metric_var.get(),
+                )
+                outer_before_text_scroll = app.prompt_form_canvas.yview()
+                app._prompt_text_mousewheel(
+                    SimpleNamespace(delta=-120), app.system_prompt_text
+                )
+                root.update_idletasks()
+                self.assertGreater(app.system_prompt_text.yview()[0], 0.0)
+                self.assertEqual(
+                    outer_before_text_scroll, app.prompt_form_canvas.yview()
+                )
+                app.system_prompt_text.yview_moveto(0.0)
+
                 scrollregion = tuple(
                     float(value)
                     for value in str(
@@ -1023,14 +1060,193 @@ class GuiTests(unittest.TestCase):
                 restore.assert_not_called()
                 root.update_idletasks()
                 self.assertEqual(before, root.geometry())
-                self.assertEqual(
-                    str(app.task_settings_tab), app.right_tabs.select()
-                )
                 self.assertEqual("pack", app.sampling_shell.winfo_manager())
-                self.assertEqual("pack", app.sampling_body.winfo_manager())
-                self.assertTrue(app.sampling_expanded)
+                self.assertTrue(app.sampling_summary_var.get())
+                self.assertFalse(app.sampling_expanded)
                 self.assertNotIn("sampling", app.nav_buttons)
                 self.assertIn("platform", app.nav_buttons)
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_single_reverse_is_independent_and_accepts_upload_drag_and_paste(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            image_path = root_path / "single image.png"
+            video_path = root_path / "single video.mp4"
+            Image.new("RGB", (24, 24), "#557799").save(image_path)
+            video_path.write_bytes(b"video")
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, self._store(root_path), show_splash=False)
+            try:
+                app.folder_var.set(str(root_path / "unchanged-project"))
+                app.media_mode_var.set("video")
+                app.show_single_reverse()
+                root.update_idletasks()
+                self.assertEqual("pack", app.single_reverse_frame.winfo_manager())
+                self.assertEqual("", app.workspace_frame.winfo_manager())
+                self.assertIn("single", app.nav_buttons)
+                self.assertIn("single", app.system_nav_buttons)
+                self.assertFalse(hasattr(app, "quick_action_buttons"))
+                with (
+                    mock.patch.object(
+                        gui.filedialog,
+                        "askopenfilename",
+                        return_value=str(image_path),
+                    ),
+                ):
+                    app.choose_single_image()
+                self.assertEqual(image_path.resolve(), app.single_image_path)
+                self.assertEqual("normal", str(app.single_image_run_button.cget("state")))
+                self.assertEqual("video", app.media_mode_var.get())
+                self.assertEqual(str(root_path / "unchanged-project"), app.folder_var.get())
+
+                with mock.patch.object(app, "_load_single_media", return_value=True) as load_media:
+                    result = app._single_media_dropped(
+                        SimpleNamespace(data=f"{{{video_path}}}")
+                    )
+                self.assertEqual("break", result)
+                self.assertEqual("media", app.single_mode_var.get())
+                load_media.assert_called_once_with(video_path.resolve())
+
+                clipboard_image = Image.new("RGB", (18, 12), "#aa8844")
+                app._set_single_mode("image")
+                with (
+                    mock.patch.object(gui.ImageGrab, "grabclipboard", return_value=clipboard_image),
+                    mock.patch.object(gui, "app_data_dir", return_value=root_path),
+                    mock.patch.object(root, "focus_get", return_value=None),
+                ):
+                    self.assertEqual("break", app._paste_single_clipboard())
+                self.assertTrue(app.single_image_path.is_file())
+                self.assertEqual(root_path, app.single_image_path.parents[2])
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_single_media_editor_loads_tracks_and_constrains_manual_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            video_path = root_path / "clip-source.mp4"
+            video_path.write_bytes(b"video")
+
+            class FakeWorker:
+                def __init__(self, _roots):
+                    self.closed = False
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    self.closed = True
+                    return None
+
+                def probe(self, _path):
+                    return {
+                        "duration": 12.5,
+                        "video_streams": [{}],
+                        "audio_streams": [{}],
+                    }
+
+                def extract_frames(self, *_args, **_kwargs):
+                    return []
+
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, self._store(root_path), show_splash=False)
+            try:
+                with mock.patch.object(gui, "MediaWorkerController", FakeWorker):
+                    app._set_single_mode("media")
+                    app._load_single_media(video_path)
+                    deadline = time.monotonic() + 2
+                    while (
+                        not app.single_media_info
+                        and time.monotonic() < deadline
+                    ):
+                        root.update()
+                        time.sleep(0.01)
+
+                self.assertTrue(app.single_media_info)
+                self.assertAlmostEqual(12.5, app.single_clip_end_var.get(), places=2)
+                self.assertEqual("normal", str(app.single_clip_reverse_button.cget("state")))
+                self.assertEqual("normal", str(app.single_audio_check.cget("state")))
+                app.single_clip_start_var.set(12.4)
+                app._single_clip_changed("start")
+                self.assertGreaterEqual(
+                    app.single_clip_end_var.get() - app.single_clip_start_var.get(),
+                    0.25,
+                )
+                app.single_clip_start_var.set(2.0)
+                app.single_clip_end_var.set(7.25)
+                app._single_clip_changed("end")
+                self.assertAlmostEqual(5.25, app.single_clip_end_var.get() - app.single_clip_start_var.get())
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_single_clip_routes_generated_media_without_mutating_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            video_path = root_path / "source.mp4"
+            video_path.write_bytes(b"video")
+
+            class FakeWorker:
+                def __init__(self, _roots):
+                    self.closed = False
+
+                def trim_video(
+                    self,
+                    _source,
+                    output_path,
+                    start_seconds,
+                    end_seconds,
+                    include_audio=True,
+                ):
+                    self.assert_selection = (start_seconds, end_seconds, include_audio)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(b"clip")
+                    return output_path
+
+                def close(self):
+                    self.closed = True
+
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, self._store(root_path), show_splash=False)
+            try:
+                original_project = root_path / "project-remains"
+                app.folder_var.set(str(original_project))
+                app.media_mode_var.set("image")
+                with (
+                    mock.patch.object(gui, "MediaWorkerController", FakeWorker),
+                    mock.patch.object(app, "start_task") as start_task,
+                ):
+                    app.start_single_clip_task(
+                        video_path,
+                        1.5,
+                        4.0,
+                        include_audio=False,
+                        action="reverse",
+                    )
+                    deadline = time.monotonic() + 2
+                    while not start_task.called and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+
+                self.assertTrue(start_task.called)
+                clip_paths = start_task.call_args.args[0]
+                self.assertEqual(1, len(clip_paths))
+                self.assertTrue(clip_paths[0].is_file())
+                self.assertIn("片段反推", str(clip_paths[0].parent))
+                self.assertEqual("image", app.media_mode_var.get())
+                self.assertEqual(str(original_project), app.folder_var.get())
+                start_task.assert_called_once_with(
+                    clip_paths,
+                    force=True,
+                    context="single",
+                    folder_override=clip_paths[0].parent,
+                    mode_override="video",
+                )
             finally:
                 root.update_idletasks()
                 app.close()
@@ -1087,6 +1303,101 @@ class GuiTests(unittest.TestCase):
                 self.assertEqual(32, captured["sampling"]["top_k"])
                 self.assertEqual(123, captured["sampling"]["seed"])
                 self.assertTrue(captured["remove_thinking_tags"])
+            finally:
+                root.update_idletasks()
+                app.close()
+
+    def test_single_runner_events_update_only_standalone_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            project = root_path / "batch-project"
+            project.mkdir()
+            image_path = root_path / "single.png"
+            Image.new("RGB", (32, 24), "#557799").save(image_path)
+            store = self._store(root_path, api_key="test-key")
+            captured = {}
+            finished = threading.Event()
+
+            class FakeRunner:
+                def __init__(self, callback):
+                    self.callback = callback
+                    self.running = False
+
+                def run(self, **kwargs):
+                    captured.update(kwargs)
+                    path = kwargs["only_paths"][0]
+                    self.callback("scan", {"result": core.ScanResult(files=[path])})
+                    self.callback(
+                        "status",
+                        {"path": path, "status": "running", "detail": "正在请求模型"},
+                    )
+                    self.callback(
+                        "status",
+                        {
+                            "path": path,
+                            "status": "success",
+                            "detail": "一张测试图片",
+                            "elapsed_seconds": 2.0,
+                            "character_count": 7,
+                            "characters_per_second": 3.5,
+                        },
+                    )
+                    self.callback("progress", {"completed": 1, "total": 1, "eta": 0})
+                    self.callback(
+                        "done",
+                        {
+                            "status": "completed",
+                            "summary": core.BatchSummary(
+                                total=1,
+                                success=1,
+                                characters=7,
+                                elapsed_seconds=2.0,
+                            ),
+                            "journal_dir": root_path,
+                        },
+                    )
+                    finished.set()
+
+                def cancel(self):
+                    pass
+
+            root = tk.Tk()
+            root.withdraw()
+            app = gui.CaptionApp(root, store, show_splash=False)
+            try:
+                app._set_system_prompt("单元测试系统提示词")
+                app.folder_var.set(str(project))
+                app.media_mode_var.set("video")
+                app.single_task_kind = "image"
+                app.single_task_path = image_path
+                with mock.patch.object(gui, "BatchRunner", FakeRunner):
+                    app.start_task(
+                        [image_path],
+                        force=True,
+                        context="single",
+                        folder_override=image_path.parent,
+                        mode_override="image",
+                    )
+                    deadline = time.monotonic() + 2
+                    while (
+                        app.single_image_result_text.get("1.0", "end-1c").strip()
+                        != "一张测试图片"
+                        and time.monotonic() < deadline
+                    ):
+                        root.update()
+                        time.sleep(0.01)
+
+                self.assertTrue(finished.is_set())
+                self.assertFalse(captured["write_output"])
+                self.assertEqual(str(project), app.folder_var.get())
+                self.assertEqual("video", app.media_mode_var.get())
+                self.assertFalse(app.items)
+                self.assertEqual(
+                    "一张测试图片",
+                    app.single_image_result_text.get("1.0", "end-1c").strip(),
+                )
+                self.assertIn("耗时 2.0 秒", app.single_metrics_var.get())
+                self.assertEqual(100, app.single_progress_var.get())
             finally:
                 root.update_idletasks()
                 app.close()
@@ -1373,13 +1684,117 @@ class GuiTests(unittest.TestCase):
     def test_hardware_monitor_formats_nonblocking_sample(self):
         monitor = gui.HardwareMonitor(interval=0.5)
         with mock.patch.object(monitor, "_cpu_percent", return_value=23.4):
-            with mock.patch.object(monitor, "_memory_text", return_value="内存 8.0/16.0 GB"):
-                with mock.patch.object(monitor, "_query_gpu", return_value="GPU 40% · 100/1000 MB"):
+            with mock.patch.object(
+                monitor,
+                "_memory_sample",
+                return_value={"percent": 50.0, "used_gb": 8.0, "total_gb": 16.0},
+            ):
+                with mock.patch.object(
+                    monitor,
+                    "_query_gpu",
+                    return_value={
+                        "percent": 40.0,
+                        "memory_used_mb": 1024.0,
+                        "memory_total_mb": 8192.0,
+                        "temperature_c": 46.0,
+                    },
+                ):
                     value = monitor.sample()
-        self.assertEqual(
-            "CPU 23%  |  内存 8.0/16.0 GB  |  GPU 40% · 100/1000 MB",
-            value,
-        )
+        self.assertEqual(23.4, value["cpu_percent"])
+        self.assertEqual(50.0, value["memory"]["percent"])
+        self.assertEqual(40.0, value["gpu"]["percent"])
+        self.assertEqual(46.0, value["gpu"]["temperature_c"])
+
+    def test_generation_metrics_and_compact_hardware_footer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root_path = Path(directory)
+            root = tk.Tk()
+            app = gui.CaptionApp(
+                root, self._store(root_path), show_splash=False
+            )
+            try:
+                app.show_workspace()
+                app._apply_hardware_sample({
+                    "cpu_percent": 25.0,
+                    "cpu_temperature_c": None,
+                    "memory": {
+                        "percent": 50.0,
+                        "used_gb": 16.0,
+                        "total_gb": 32.0,
+                    },
+                    "gpu": {
+                        "percent": 40.0,
+                        "memory_used_mb": 4096.0,
+                        "memory_total_mb": 8192.0,
+                        "temperature_c": 46.0,
+                    },
+                })
+                self.assertEqual(25.0, app.cpu_percent_var.get())
+                self.assertEqual("25%", app.cpu_metric_var.get())
+                self.assertEqual("16.0/32G", app.memory_metric_var.get())
+                self.assertEqual("4.0/8G", app.vram_metric_var.get())
+                self.assertEqual("46°C", app.gpu_temperature_metric_var.get())
+                self.assertNotIn(
+                    "待机",
+                    " ".join(
+                        str(widget.cget("text"))
+                        for widget in app.status_host.winfo_children()
+                        if isinstance(widget, ttk.Label)
+                    ),
+                )
+                self.assertEqual(
+                    " · 耗时 2.0 秒 · 字数 120 · 速度 60.0 字/秒",
+                    app._format_generation_metrics(
+                        "success",
+                        elapsed_seconds=2.0,
+                        character_count=120,
+                        characters_per_second=60.0,
+                    ),
+                )
+                image_path = root_path / "metric.jpg"
+                Image.new("RGB", (24, 24), "white").save(image_path)
+                app.folder_var.set(str(root_path))
+                app._set_item(
+                    image_path,
+                    "pending",
+                    "",
+                    caption_exists=False,
+                    caption_usable=False,
+                )
+                with mock.patch.object(app, "log") as log:
+                    app._post_event("status", {
+                        "path": image_path,
+                        "status": "success",
+                        "detail": "中文 test",
+                        "elapsed_seconds": 2.0,
+                        "character_count": 6,
+                        "characters_per_second": 3.0,
+                    })
+                    app._process_events()
+                self.assertTrue(any(
+                    "耗时 2.0 秒 · 字数 6 · 速度 3.0 字/秒"
+                    in str(call.args[0])
+                    for call in log.call_args_list
+                ))
+
+                summary = core.BatchSummary(
+                    total=1,
+                    success=1,
+                    characters=120,
+                    elapsed_seconds=2.0,
+                )
+                with (
+                    mock.patch.object(app, "log") as log,
+                    mock.patch.object(app, "refresh_project_center"),
+                ):
+                    app._handle_done("completed", summary, root_path)
+                self.assertIn(
+                    "总耗时 2.0 秒，总字数 120，平均速度 60.0 字/秒",
+                    log.call_args.args[0],
+                )
+            finally:
+                root.update_idletasks()
+                app.close()
 
     def test_settings_masks_and_fully_clears_saved_api_key(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1516,7 +1931,9 @@ class GuiTests(unittest.TestCase):
                     ],
                 )
                 self.assertFalse(app.sampling_expanded)
-                self.assertEqual("", app.sampling_body.winfo_manager())
+                self.assertEqual("pack", app.sampling_shell.winfo_manager())
+                self.assertTrue(app.sampling_save_button.winfo_exists())
+                self.assertTrue(app.seed_random_button.winfo_exists())
                 app._layout_filter_bar(620)
                 self.assertEqual(1, app.filter_box.grid_info()["row"])
                 self.assertEqual(0, app.search_entry.grid_info()["row"])
@@ -1575,6 +1992,8 @@ class GuiTests(unittest.TestCase):
                     app.user_prompt_text,
                     app.system_prompt_text,
                     app.log_text,
+                    app.single_image_result_text,
+                    app.single_media_result_text,
                 ):
                     self.assertEqual(
                         gui.THEMES["day"]["input_bg"],
@@ -1604,6 +2023,8 @@ class GuiTests(unittest.TestCase):
                         app.user_prompt_text,
                         app.system_prompt_text,
                         app.log_text,
+                        app.single_image_result_text,
+                        app.single_media_result_text,
                     ):
                         self.assertEqual(
                             gui.THEMES[theme_key]["input_bg"],
@@ -1613,7 +2034,17 @@ class GuiTests(unittest.TestCase):
                         gui.THEMES[theme_key]["input_readonly"],
                         app.system_release_notes.cget("background"),
                     )
-                self.assertEqual(5, len(app._themed_text_widgets))
+                    for canvas, color_key in (
+                        (app.single_image_canvas, "media_bg"),
+                        (app.single_media_canvas, "media_bg"),
+                        (app.single_editor_preview_canvas, "media_bg"),
+                        (app.single_timeline_canvas, "input_readonly"),
+                    ):
+                        self.assertEqual(
+                            gui.THEMES[theme_key][color_key],
+                            canvas.cget("background"),
+                        )
+                self.assertEqual(7, len(app._themed_text_widgets))
                 app.user_prompt_text.configure(
                     background=gui.THEMES["night"]["input_bg"]
                 )
@@ -1966,37 +2397,18 @@ class GuiTests(unittest.TestCase):
             )
             try:
                 app.show_workspace()
-                app.right_tabs.select(app.task_settings_tab)
-                app._toggle_sampling_panel(True)
                 deadline = time.monotonic() + 0.25
                 while time.monotonic() < deadline:
                     root.update()
                     time.sleep(0.01)
 
-                self.assertEqual(
-                    "right", app.task_settings_scrollbar.pack_info()["side"]
-                )
-                scrollregion = tuple(
-                    float(value)
-                    for value in str(
-                        app.task_settings_canvas.cget("scrollregion")
-                    ).split()
-                )
-                self.assertGreater(
-                    scrollregion[3] - scrollregion[1],
-                    app.task_settings_canvas.winfo_height(),
-                )
-                app.task_settings_canvas.yview_moveto(1.0)
-                root.update_idletasks()
-                root.update()
-                canvas_top = app.task_settings_canvas.winfo_rooty()
-                canvas_bottom = (
-                    canvas_top + app.task_settings_canvas.winfo_height()
-                )
+                self.assertEqual("pack", app.sampling_shell.winfo_manager())
+                shell_top = app.sampling_shell.winfo_rooty()
+                shell_bottom = shell_top + app.sampling_shell.winfo_height()
                 seed_top = app.seed_entry.winfo_rooty()
                 seed_bottom = seed_top + app.seed_entry.winfo_height()
-                self.assertGreaterEqual(seed_top, canvas_top)
-                self.assertLessEqual(seed_bottom, canvas_bottom)
+                self.assertGreaterEqual(seed_top, shell_top)
+                self.assertLessEqual(seed_bottom, shell_bottom)
                 self.assertEqual(
                     "SectionCard.TFrame", app.format_card.cget("style")
                 )

@@ -501,6 +501,51 @@ class CoreTests(unittest.TestCase):
             image_url = payload["messages"][0]["content"][0]["image_url"]["url"]
             self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
 
+    def test_hf_local_caption_explicitly_toggles_thinking_in_template(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "sample.jpg"
+            Image.new("RGB", (24, 24), "white").save(image_path)
+
+            class StopAfterTemplate(RuntimeError):
+                pass
+
+            template_calls = []
+
+            class FakeProcessor:
+                def apply_chat_template(self, messages, **kwargs):
+                    template_calls.append(kwargs)
+                    raise StopAfterTemplate
+
+            client = core.LocalCaptionClient.__new__(core.LocalCaptionClient)
+            client.model_folder = Path(directory)
+            client.token = core.CancellationToken()
+            client.processor = FakeProcessor()
+            client.model = object()
+            client.torch = None
+            client.device = "cpu"
+            client.sampling = core.normalize_sampling({
+                "max_tokens": 512,
+                "temperature": 0.4,
+                "top_p": 0.8,
+                "top_k": 32,
+                "seed": 11,
+            })
+            client.enable_mtp = False
+            client.mtp_active = False
+            client.remove_thinking_tags = False
+
+            with self.assertRaises(StopAfterTemplate):
+                client.caption_image(image_path, "描述图片")
+
+            self.assertEqual(1, len(template_calls))
+            self.assertIs(template_calls[0]["enable_thinking"], True)
+
+            client.remove_thinking_tags = True
+            template_calls.clear()
+            with self.assertRaises(StopAfterTemplate):
+                client.caption_image(image_path, "描述图片")
+            self.assertIs(template_calls[0]["enable_thinking"], False)
+
     def test_lmstudio_low_vram_loader_uses_cli_resource_guards(self):
         completed = mock.Mock(returncode=0, stdout="loaded", stderr="")
         inventory = [{
@@ -628,7 +673,7 @@ class CoreTests(unittest.TestCase):
             self.assertIn("Wait-Process -Id 54321", script_text)
             self.assertIn("Start-Sleep -Milliseconds 750", script_text)
             self.assertIn("Copy-Item -LiteralPath", script_text)
-            self.assertIn("Get-FileHash -LiteralPath $staged", script_text)
+            self.assertIn("$stagedHash = Get-Sha256 $staged", script_text)
             self.assertIn(
                 "$env:PYINSTALLER_RESET_ENVIRONMENT = '1'", script_text
             )
@@ -1006,6 +1051,83 @@ class CoreTests(unittest.TestCase):
                     core.CancellationToken(),
                 )
 
+    def test_llama_cpp_server_command_contains_gguf_and_mmproj(self):
+        client = core.LlamaCppCaptionClient.__new__(
+            core.LlamaCppCaptionClient
+        )
+        client.server_path = Path(r"C:\Tools\llama-server.exe")
+        client.model_path = Path(r"E:\Models\vision.gguf")
+        client.mmproj_path = Path(r"E:\Models\mmproj-F16.gguf")
+        client.model_alias = "vision-local"
+        client.context_length = 4096
+        client.gpu_layers = 24
+        command = client._server_command(18088)
+        self.assertEqual(
+            [
+                r"C:\Tools\llama-server.exe",
+                "-m", r"E:\Models\vision.gguf",
+                "--mmproj", r"E:\Models\mmproj-F16.gguf",
+                "--host", "127.0.0.1",
+                "--port", "18088",
+                "-c", "4096",
+                "--alias", "vision-local",
+                "-ngl", "24",
+            ],
+            command,
+        )
+
+    def test_llama_cpp_sampling_payload_includes_full_local_controls(self):
+        client = core.LlamaCppCaptionClient.__new__(
+            core.LlamaCppCaptionClient
+        )
+        client.sampling = core.normalize_sampling({
+            "max_tokens": 1024,
+            "temperature": 0.25,
+            "top_p": 0.85,
+            "top_k": 20,
+            "frequency_penalty": 0.15,
+            "presence_penalty": 0.2,
+            "seed": 7,
+        })
+        client.remove_thinking_tags = True
+        payload = client._sampling_payload()
+        self.assertEqual(1024, payload["max_tokens"])
+        self.assertEqual(0.25, payload["temperature"])
+        self.assertEqual(0.85, payload["top_p"])
+        self.assertEqual(20, payload["top_k"])
+        self.assertEqual(0.15, payload["frequency_penalty"])
+        self.assertEqual(0.2, payload["presence_penalty"])
+        self.assertEqual(7, payload["seed"])
+        # llama.cpp's current Qwen vision templates accept low/medium/xhigh;
+        # the client uses low when the UI asks to remove thinking output.
+        self.assertEqual("low", payload["reasoning_effort"])
+
+    def test_settings_normalize_llama_cpp_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = core.SettingsStore(
+                root / "settings.json",
+                root / "legacy.json",
+                MemorySecretStore(),
+            )
+            settings = store.load()
+            settings.update({
+                "local_runtime": "llamacpp",
+                "llama_server_path": "  C:/Tools/llama-server.exe  ",
+                "llama_model_path": "  E:/Models/vision.gguf  ",
+                "llama_mmproj_path": "  E:/Models/mmproj-F16.gguf  ",
+                "llama_context_length": "8192",
+                "llama_gpu_layers": "-1",
+            })
+            store.save(settings)
+            restored = store.load()
+            self.assertEqual("llamacpp", restored["local_runtime"])
+            self.assertEqual(
+                "C:/Tools/llama-server.exe", restored["llama_server_path"]
+            )
+            self.assertEqual(8192, restored["llama_context_length"])
+            self.assertEqual(-1, restored["llama_gpu_layers"])
+
     def test_heic_content_with_jpg_extension_is_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "renamed.jpg"
@@ -1185,7 +1307,7 @@ class CoreTests(unittest.TestCase):
             persisted = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(3, persisted["concurrency"])
             self.assertEqual("night", persisted["theme"])
-            self.assertEqual(13, persisted["version"])
+            self.assertEqual(14, persisted["version"])
             self.assertNotIn("suppress_seed_2_0_shutdown_notice", persisted)
 
     def test_project_summary_reports_saved_progress_and_directory_state(self):
@@ -1336,13 +1458,54 @@ class CoreTests(unittest.TestCase):
                 if kind == "status" and payload["status"] == "success"
             )
             self.assertGreaterEqual(success_event["elapsed_seconds"], 0)
+            self.assertEqual(10, success_event["character_count"])
+            self.assertGreater(success_event["characters_per_second"], 0)
+            self.assertEqual(10, summary.characters)
+            self.assertGreaterEqual(summary.elapsed_seconds, 0)
             states = list(data_root.glob("projects/*/state.json"))
             self.assertEqual(1, len(states))
             state = json.loads(states[0].read_text(encoding="utf-8"))
             self.assertEqual("completed", state["status"])
+            self.assertEqual(10, state["summary"]["characters"])
+            self.assertGreaterEqual(state["summary"]["elapsed_seconds"], 0)
             self.assertEqual("success", next(iter(state["items"].values()))["status"])
             self.assertEqual(1, len(list(data_root.glob("projects/*/run-*.jsonl"))))
             self.assertEqual(1, len(list(data_root.glob("projects/*/last-failures.csv"))))
+
+    def test_single_run_can_return_caption_without_writing_txt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "image.jpg"
+            Image.new("RGB", (24, 24)).save(image_path)
+
+            def sender(method, url, **kwargs):
+                return FakeResponse(
+                    payload={"choices": [{"message": {"content": "standalone caption"}}]}
+                )
+
+            events = []
+            with mock.patch.object(core, "app_data_dir", return_value=root / "appdata"):
+                runner = core.BatchRunner(
+                    lambda kind, payload: events.append((kind, payload)),
+                    core.HttpTransport(sender),
+                )
+                summary = runner.run(
+                    root,
+                    "image",
+                    "prompt",
+                    "seed-2.1-pro",
+                    "key",
+                    write_output=False,
+                )
+
+            self.assertEqual(1, summary.success)
+            self.assertFalse(core.caption_path_for(image_path).exists())
+            success = next(
+                payload
+                for kind, payload in events
+                if kind == "status" and payload["status"] == "success"
+            )
+            self.assertEqual("standalone caption", success["detail"])
 
     def test_batch_persists_failure_manifest_with_request_id(self):
         with tempfile.TemporaryDirectory() as directory:

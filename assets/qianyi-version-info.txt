@@ -1,8 +1,8 @@
 # UTF-8 Windows version resource for the public Qianyi executable.
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(3, 6, 4, 0),
-        prodvers=(3, 6, 4, 0),
+        filevers=(3, 6, 6, 0),
+        prodvers=(3, 6, 6, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -18,7 +18,7 @@ VSVersionInfo(
                     [
                         StringStruct("CompanyName", "芊熠智能"),
                         StringStruct("FileDescription", "芊熠智能打标工作台"),
-                        StringStruct("FileVersion", "3.6.4.0"),
+                        StringStruct("FileVersion", "3.6.6.0"),
                         StringStruct("InternalName", "QianyiMediaCaptionTool"),
                         StringStruct(
                             "LegalCopyright",
@@ -28,7 +28,7 @@ VSVersionInfo(
                             "OriginalFilename", "Qianyi-MediaCaptionTool.exe"
                         ),
                         StringStruct("ProductName", "芊熠智能打标工作台"),
-                        StringStruct("ProductVersion", "3.6.4"),
+                        StringStruct("ProductVersion", "3.6.6"),
                         StringStruct(
                             "Comments", "AI 图像与视频训练数据标注工具"
                         ),

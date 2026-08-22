@@ -4,6 +4,7 @@ from datetime import datetime
 import ctypes
 import math
 import os
+import secrets
 from pathlib import Path
 import queue
 import subprocess
@@ -14,11 +15,18 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 import webbrowser
 
-from PIL import Image, ImageDraw, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageGrab, ImageOps, ImageTk
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:  # Upload buttons remain available without the optional runtime.
+    DND_FILES = None
+    TkinterDnD = None
 
 from media_caption_core import (
     API_PROVIDERS,
     APP_VERSION,
+    AUDIO_EXTENSIONS,
     BatchRunner,
     BatchSummary,
     CancelledError,
@@ -26,14 +34,20 @@ from media_caption_core import (
     DEFAULT_MODEL_KEY,
     DEFAULT_PROVIDER_KEY,
     DEFAULT_SAMPLING,
+    IMAGE_EXTENSIONS,
     LMSTUDIO_CAPTION_TOKEN_LIMIT,
+    LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+    LLAMA_CPP_DEFAULT_GPU_LAYERS,
     LMSTUDIO_LOAD_PROFILE_DEFAULT,
     MAX_CONCURRENCY,
     MODELS,
     ScanResult,
     SettingsStore,
+    VIDEO_EXTENSIONS,
+    app_data_dir,
     caption_path_for,
     check_latest_release,
+    count_output_characters,
     create_app_backup,
     create_diagnostic_bundle,
     create_windows_update_script,
@@ -58,54 +72,49 @@ from media_caption_core import (
     unload_lmstudio_model,
     write_caption,
 )
-from media_caption_worker import run_worker_cli
+from media_caption_worker import (
+    MediaWorkerController,
+    MediaWorkerError,
+    run_worker_cli,
+)
 
 
 APP_TITLE = "芊熠智能打标工作台"
 UI_FONT = "HarmonyOS Sans SC"
 LATIN_FONT = "Segoe UI Variable Text"
 MONO_FONT = "Consolas"
+# The workbench is deliberately text-forward.  Keep these values in one
+# place so the complete UI can be enlarged without hunting through every
+# ttk style and classic Tk text widget separately.
+# Readability scale for the workbench.  Tk rendering is normalized to a
+# 96-DPI logical canvas on Windows, so these values are the actual visual
+# point sizes rather than being magnified a second time by system DPI.
+UI_TEXT_SIZE = 15
+UI_SMALL_SIZE = 14
+UI_MEDIUM_SIZE = 15
+UI_TITLE_SIZE = 21
+UI_SECTION_SIZE = 16
+UI_MONO_SIZE = 13
+# Form controls need a slightly larger optical size than surrounding helper
+# text.  The adaptive typography hook below steps this down only on compact
+# windows so values remain readable without being clipped.
+UI_INPUT_SIZE = 16
+WORKSPACE_LEFT_WIDTH = 360
+WORKSPACE_CENTER_WIDTH = 600
+WORKSPACE_RIGHT_WIDTH = 420
 RELEASE_NOTES = (
-    "修复窗口最小化后恢复或最大化时工作区、缩略图与图标闪烁的问题",
-    "缩略图改为原位响应式重排，预览图片加入内存与尺寸缓存，恢复窗口不再重复解码",
-    "LM Studio 新增低显存安全、纯 CPU 与沿用预设三种加载策略",
-    "修复一键加载丢失 GPU、上下文、并行和 MTP 参数导致后端崩溃",
-    "LM Studio 请求阶段真正关闭思考，并将打标输出安全上限提升至 768 tokens",
-    "优化本地图片视觉 tokens、显存不足提示与 Hugging Face 大模型设备分配",
-    "彻底修复下拉弹层在日光与夜光模式切换后残留上一主题颜色",
-    "统一同步全部下拉框、菜单、动态设置弹窗、文本区与开关控件",
-    "为 Windows EXE 补充公司名、产品名、版本号与版权信息",
-    "修复旧版立即更新后继承失效 _MEI 目录导致 Python DLL 加载失败",
-    "平台设置标题新增 MTP 加速与思考标签清理滑块",
-    "兼容本地模型可启用原生 MTP，模型输出可自动移除思考区块",
-    "二次打标完成后立即覆盖刷新当前标注结果与 TXT",
-    "结果区新增生成中、已更新、失败保留和单项耗时反馈",
-    "采用现代包豪斯日光模式与灰绿色夜光模式",
-    "统一 HarmonyOS Sans SC 字体层级并减少冗余粗体",
-    "新增语义标题图标、系统说明与版本更新记录",
-    "接入 GitHub Releases 启动检查与工作区更新提示",
-    "修复下载完成后未覆盖旧 EXE、未自动重启的 Windows 更新器交接问题",
-    "重构画布优先工作区、右侧检查器与固定任务栏",
-    "禁用关闭状态下拉框与数值框的滚轮改值，避免滚动页面时误改参数",
-    "扩充 OpenAI、Google、月之暗面、千问和硅基流动模型",
-    "新增自定义 OpenAI 兼容 Base URL、模型 ID 与 API Key 配置",
-    "内置供应商仅显示 API Key，自定义接口按需展开 Base URL",
-    "供应商改为带品牌图标的下拉菜单，API 与本地模型互斥置灰",
-    "本地模型并发改为用户可选，并持续提示显存与内存占用风险",
-    "新增 LM Studio 本地服务模式，可读取已加载模型并直接进行图片反推",
-    "LM Studio 模型改为只读下拉选择，并支持一键加载与卸载",
-    "LM Studio 采样参数由服务端接管，工作台仅附加输出安全上限",
-    "LM Studio 慢模型支持 600 秒读取，并拦截连续重复字符等退化输出",
-    "自动更新开关迁移到系统说明，更正豆包 Seed 2.1 Turbo 名称",
-    "MiniMax M3 已并入火山引擎 Coding Plan",
-    "新增按需媒体 Worker、视频预检、自动备份与隐私脱敏诊断包",
-    "修复原生文本区在日光与夜光模式往返切换时残留上一主题颜色",
-    "右侧任务设置支持滚动，采样 Seed 完整显示并统一柔和卡片边界",
-    "提示词页新增独立局部滚动区，仅滚动主体过滤、用户要求与系统模板",
-    "重做提示词预设命名弹窗，统一主题、中文操作与现代模态交互",
+    "工作区重构为大尺寸三列布局，统一可读字体层级并完善滚动与控件显示",
+    "新增 llama.cpp 原生 GGUF 本地运行方式，自动管理 llama-server、主模型与 mmproj 生命周期",
+    "新增 LM Studio 本地服务模式，支持模型读取、加载/卸载以及本地视觉反推",
+    "本地反推统一传递采样、MTP 与思考标签设置，并完善显存/并发提示与失败诊断",
+    "新增独立单次反推模块，支持图片、音频和视频片段编辑后反推",
+    "扩充主流 API 供应商与模型，新增自定义 OpenAI 兼容接口配置",
+    "重做日光/夜光主题与原生控件同步，修复颜色残留、窗口恢复闪屏和缩略图闪烁",
+    "接入 GitHub Releases 检查、下载、覆盖安装与自动重启更新流程",
+    "优化二次打标覆盖写入、结果即时反馈、耗时/字数/速度日志和 Windows EXE 元信息",
 )
 FEATURE_GROUPS = (
-    ("素材工作流", "扫描图片与视频、缩略图复核、状态筛选和批量选择。"),
+    ("素材工作流", "支持独立单次反推、图片粘贴、音视频片段编辑与项目批量处理。"),
     ("智能打标", "按训练目标生成自然语言或词组标签，支持多平台视觉模型。"),
     ("质量与整理", "检测缺失、无效及孤立 TXT，支持相似图分析和批量替换。"),
     ("任务与导出", "固定任务栏管理并发、重试、停止，并导出 JSONL 或 CSV。"),
@@ -145,6 +154,7 @@ FOCUS_LABELS = {value: label for label, value in FOCUS_OPTIONS.items()}
 LOCAL_RUNTIME_OPTIONS = {
     "Hugging Face 本地目录": "huggingface",
     "LM Studio 本地服务": "lmstudio",
+    "llama.cpp 原生 GGUF": "llamacpp",
 }
 LOCAL_RUNTIME_LABELS = {
     value: label for label, value in LOCAL_RUNTIME_OPTIONS.items()
@@ -186,6 +196,26 @@ API_KEY_PORTALS = {
         "https://cloud.siliconflow.cn/account/ak",
     ),
     "custom": ("自定义接口", ""),
+}
+LOCAL_RUNTIME_PORTALS = {
+    "lmstudio": {
+        "title": "LM Studio",
+        "url": "https://lmstudio.ai/download",
+        "button": "打开 LM Studio 下载页",
+        "description": (
+            "适合不想手动管理命令行的本地视觉模型用户。LM Studio 提供桌面界面、"
+            "模型加载、显存/CPU 参数和 OpenAI 兼容本地服务；启动服务后即可在本软件中选择 LM Studio。"
+        ),
+    },
+    "llamacpp": {
+        "title": "llama.cpp",
+        "url": "https://github.com/ggml-org/llama.cpp/releases",
+        "button": "打开 llama.cpp 下载页",
+        "description": (
+            "适合直接运行 GGUF 单体视觉模型。llama.cpp 负责本地推理，本软件会管理 llama-server、"
+            "主 GGUF 与 mmproj 文件，并支持图片反推时传入采样参数。"
+        ),
+    },
 }
 SAMPLING_PRESETS = {
     "稳定标注": {
@@ -301,15 +331,46 @@ def activate_theme(theme_key: str) -> str:
 
 activate_theme(DEFAULT_THEME_KEY)
 def enable_dpi_awareness() -> None:
+    """Enable native Windows rendering before Tk creates its first window."""
+    if sys.platform != "win32":
+        return
+    # Prefer per-monitor v2.  The fallbacks cover older Windows builds and
+    # Python/Tk combinations where the newer API is not exported.
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetProcessDpiAwarenessContext.restype = ctypes.c_bool
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+
+def configure_tk_rendering(root: tk.Tk) -> None:
+    """Keep Windows from enlarging Tk widgets a second time.
+
+    Tk can report a monitor-derived scaling value above 1.0 even after the
+    process is DPI-aware.  This pixel-oriented interface uses a stable 96-DPI
+    logical canvas; normalizing Tk's own scaling keeps the 1180x760 window and
+    three-column measurements unchanged while rendering text and bitmap icons
+    at their native pixel size.
+    """
     if sys.platform != "win32":
         return
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    except (AttributeError, OSError):
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            pass
+        current = float(root.tk.call("tk", "scaling"))
+        if current > 1.05:
+            root.tk.call("tk", "scaling", 1.0)
+    except (tk.TclError, TypeError, ValueError):
+        pass
 
 
 def resource_path(relative_path: str | Path) -> Path:
@@ -317,17 +378,49 @@ def resource_path(relative_path: str | Path) -> Path:
     return base / Path(relative_path)
 
 
-def configure_main_window(root: tk.Tk) -> str:
+def _configure_window_geometry(
+    root: tk.Tk,
+    target_width: int,
+    target_height: int,
+) -> str:
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
-    initial_width = max(1024, min(1720, screen_width - 48))
-    initial_height = max(760, min(1200, screen_height - 48))
+    # Leave only a slim safety margin for the Windows frame.  The previous
+    # 80px cap made a DPI-scaled 1920x1080 desktop report a much smaller
+    # logical work area and clipped the three-column inspector again.
+    initial_width = max(960, min(target_width, screen_width - 40))
+    initial_height = max(620, min(target_height, screen_height - 40))
     x = max(0, (screen_width - initial_width) // 2)
     y = max(0, (screen_height - initial_height) // 2)
     geometry = f"{initial_width}x{initial_height}+{x}+{y}"
     root.geometry(geometry)
+    # Keep a conservative fallback minimum for callers that use this helper
+    # directly; CaptionApp replaces it with the active view's exact size when
+    # switching between launch and workspace windows.
     root.minsize(1024, 720)
     return geometry
+
+
+def _geometry_size(geometry: str) -> tuple[int, int]:
+    """Return the width/height portion of a Tk geometry string."""
+    try:
+        size = geometry.split("+", 1)[0]
+        width, height = size.lower().split("x", 1)
+        return max(1, int(width)), max(1, int(height))
+    except (AttributeError, TypeError, ValueError):
+        return 960, 620
+
+
+def configure_launch_window(root: tk.Tk) -> str:
+    # The launch view is intentionally a little wider so the hero image keeps
+    # its composition without becoming cramped.
+    return _configure_window_geometry(root, 1440, 820)
+
+
+def configure_main_window(root: tk.Tk) -> str:
+    # The working surface gets more height for the three-column inspector and
+    # result panels, which reduces clipped labels on dense layouts.
+    return _configure_window_geometry(root, 1720, 1200)
 
 
 def center_dialog(dialog: tk.Toplevel, parent: tk.Misc) -> tuple[int, int]:
@@ -393,7 +486,7 @@ class ToolTip:
             relief=tk.SOLID,
             padx=8,
             pady=4,
-            font=(UI_FONT, 9),
+            font=(UI_FONT, UI_SMALL_SIZE),
         ).pack()
 
     def hide(self, _event=None) -> None:
@@ -533,7 +626,12 @@ class HardwareMonitor:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self._last_cpu: tuple[int, int] | None = None
-        self._gpu_text = "GPU 未检测到"
+        self._gpu_sample = {
+            "percent": None,
+            "memory_used_mb": None,
+            "memory_total_mb": None,
+            "temperature_c": None,
+        }
 
     @staticmethod
     def _filetime_value(value: _FileTime) -> int:
@@ -561,28 +659,38 @@ class HardwareMonitor:
         return max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0))
 
     @staticmethod
-    def _memory_text() -> str:
+    def _memory_sample() -> dict:
         if sys.platform != "win32":
-            return "内存 --"
+            return {"percent": None, "used_gb": None, "total_gb": None}
         status = _MemoryStatusEx()
         status.length = ctypes.sizeof(status)
         try:
             if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return "内存 --"
+                return {"percent": None, "used_gb": None, "total_gb": None}
         except (AttributeError, OSError):
-            return "内存 --"
+            return {"percent": None, "used_gb": None, "total_gb": None}
         gib = 1024 ** 3
         used = (status.total_physical - status.available_physical) / gib
         total = status.total_physical / gib
-        return f"内存 {used:.1f}/{total:.1f} GB"
+        return {
+            "percent": float(status.memory_load),
+            "used_gb": used,
+            "total_gb": total,
+        }
 
     @staticmethod
-    def _query_gpu() -> str:
+    def _query_gpu() -> dict:
+        unavailable = {
+            "percent": None,
+            "memory_used_mb": None,
+            "memory_total_mb": None,
+            "temperature_c": None,
+        }
         try:
             completed = subprocess.run(
                 [
                     "nvidia-smi",
-                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
                     "--format=csv,noheader,nounits",
                 ],
                 capture_output=True,
@@ -592,21 +700,36 @@ class HardwareMonitor:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
-            return "GPU 未检测到"
+            return unavailable
         if completed.returncode != 0 or not completed.stdout.strip():
-            return "GPU 未检测到"
+            return unavailable
         first = completed.stdout.strip().splitlines()[0].split(",")
         if len(first) < 3:
-            return "GPU 已连接"
-        utilization, used, total = (value.strip() for value in first[:3])
-        return f"GPU {utilization}% · {used}/{total} MB"
+            return unavailable
 
-    def sample(self, refresh_gpu: bool = True) -> str:
+        def number(index: int) -> float | None:
+            try:
+                return float(first[index].strip())
+            except (IndexError, TypeError, ValueError):
+                return None
+
+        return {
+            "percent": number(0),
+            "memory_used_mb": number(1),
+            "memory_total_mb": number(2),
+            "temperature_c": number(3),
+        }
+
+    def sample(self, refresh_gpu: bool = True) -> dict:
         if refresh_gpu:
-            self._gpu_text = self._query_gpu()
+            self._gpu_sample = self._query_gpu()
         cpu = self._cpu_percent()
-        cpu_text = f"CPU {cpu:.0f}%" if cpu is not None else "CPU --"
-        return f"{cpu_text}  |  {self._memory_text()}  |  {self._gpu_text}"
+        return {
+            "cpu_percent": cpu,
+            "cpu_temperature_c": None,
+            "memory": self._memory_sample(),
+            "gpu": dict(self._gpu_sample),
+        }
 
     def start(self, callback) -> None:
         if self.thread and self.thread.is_alive():
@@ -819,7 +942,7 @@ class MediaGallery(ttk.Frame):
                 background=COLORS["surface"],
                 foreground=COLORS["text"],
                 anchor=tk.W,
-                font=(UI_FONT, 9, "bold"),
+                font=(UI_FONT, UI_SMALL_SIZE, "bold"),
             ).pack(fill=tk.X)
             status_label = tk.Label(
                 footer,
@@ -827,7 +950,7 @@ class MediaGallery(ttk.Frame):
                 background=COLORS["surface"],
                 foreground=STATUS_COLORS[item["status"]],
                 anchor=tk.W,
-                font=(UI_FONT, 8),
+                font=(UI_FONT, UI_SMALL_SIZE),
             )
             status_label.pack(fill=tk.X, pady=(3, 0))
             self.card_frames[key] = card
@@ -845,6 +968,54 @@ class MediaGallery(ttk.Frame):
         self.total_text.set(f"{len(self.items)} 个素材")
         self.page_text.set(f"{self.page + 1 if pages else 0} / {pages}")
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def apply_theme(self) -> None:
+        """Repaint visible gallery widgets without destroying thumbnails.
+
+        Rebuilding the gallery on every day/night switch was the main source
+        of the visible colour-transition pause and thumbnail flash.
+        """
+        item_by_key = {str(item["path"]): item for item in self.items}
+        for key, card in tuple(self.card_frames.items()):
+            try:
+                if not card.winfo_exists():
+                    continue
+                selected = key in self.selected
+                card.configure(
+                    background=COLORS["surface"],
+                    highlightbackground=(
+                        COLORS["accent"] if selected else COLORS["border"]
+                    ),
+                    highlightcolor=COLORS["accent"],
+                )
+                image_label = self.image_labels.get(key)
+                if image_label is not None:
+                    image_label.configure(
+                        background=COLORS["media_bg"],
+                        foreground=COLORS["muted"],
+                    )
+                footer = next(
+                    (child for child in card.winfo_children() if child is not image_label),
+                    None,
+                )
+                if footer is not None:
+                    footer.configure(background=COLORS["surface"])
+                    labels = footer.winfo_children()
+                    if labels:
+                        labels[0].configure(
+                            background=COLORS["surface"],
+                            foreground=COLORS["text"],
+                        )
+                    if len(labels) > 1:
+                        item = item_by_key.get(key, {})
+                        labels[1].configure(
+                            background=COLORS["surface"],
+                            foreground=STATUS_COLORS.get(
+                                item.get("status", "pending"), COLORS["muted"]
+                            ),
+                        )
+            except tk.TclError:
+                continue
 
     def update_selection(self, selected: set[str]) -> None:
         self.selected = set(selected)
@@ -881,6 +1052,7 @@ class CaptionApp:
         show_splash: bool = True,
     ):
         self.root = root
+        configure_tk_rendering(self.root)
         self.production_start = settings_store is None
         if show_splash:
             self.root.withdraw()
@@ -896,6 +1068,10 @@ class CaptionApp:
         self.events: queue.Queue[tuple[str, dict]] = queue.Queue(maxsize=20000)
         self.runner: BatchRunner | None = None
         self.controller_thread: threading.Thread | None = None
+        self.active_task_context = "batch"
+        self.media_edit_worker: MediaWorkerController | None = None
+        self.media_edit_worker_lock = threading.Lock()
+        self.media_edit_cancelled = threading.Event()
         self.items: dict[str, dict] = {}
         self.row_paths: dict[str, Path] = {}
         self.path_rows: dict[str, str] = {}
@@ -906,6 +1082,18 @@ class CaptionApp:
         self._preview_render_key: tuple[str, int, int, int, int] | None = None
         self.closing = False
         self.selected_paths: set[str] = set()
+        self.single_image_path: Path | None = None
+        self.single_media_path: Path | None = None
+        self.single_task_path: Path | None = None
+        self.single_task_kind = "image"
+        self.single_media_info: dict = {}
+        self.single_image_preview_source: Image.Image | None = None
+        self.single_image_preview_photo = None
+        self.single_media_preview_source: Image.Image | None = None
+        self.single_media_preview_photo = None
+        self.single_media_preview_frames: list[Image.Image] = []
+        self.single_timeline_photo = None
+        self.single_clip_operation = "reverse"
         self.thumbnail_cache: dict[str, ImageTk.PhotoImage] = {}
         self.thumbnail_pending: set[str] = set()
         self.thumbnail_jobs: queue.Queue[Path] = queue.Queue(maxsize=300)
@@ -947,6 +1135,7 @@ class CaptionApp:
         self._canvas_heading_compact: bool | None = None
         self._preview_panel_layout: tuple[int, int] | None = None
         self._system_features_wraplength: int | None = None
+        self._typography_bucket: str | None = None
         self._window_suspended = False
         self._window_resume_after_id = None
         self.theme_buttons: dict[str, list[ttk.Button]] = {
@@ -964,22 +1153,30 @@ class CaptionApp:
         self.hardware_monitor = HardwareMonitor()
         self.counts = {status: 0 for status in STATUS_TEXT}
         self.counts["total"] = 0
+        self.caption_health_counts = {"missing": 0, "invalid": 0}
 
         self.root.title(f"{APP_TITLE} {APP_VERSION}")
         self._set_window_icon()
         self._load_toolbar_icons()
         self._load_provider_icons()
+        self.launch_geometry = configure_launch_window(self.root)
         self.normal_geometry = configure_main_window(self.root)
+        self.launch_size = _geometry_size(self.launch_geometry)
+        self.normal_size = _geometry_size(self.normal_geometry)
+        self.root.minsize(*self.normal_size)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._configure_style()
         self._build_ui()
+        self.root.bind("<Configure>", self._adaptive_typography, add="+")
+        self._adaptive_typography(force=True)
+        self.root.bind("<Control-v>", self._paste_single_clipboard, add="+")
         self.root.bind("<Unmap>", self._window_unmapped, add="+")
         self.root.bind("<Map>", self._window_mapped, add="+")
         self._install_form_wheel_guards()
         self._load_values()
         self._start_thumbnail_workers()
         self.hardware_monitor.start(
-            lambda text: self._post_event("hardware", {"text": text})
+            lambda sample: self._post_event("hardware", {"sample": sample})
         )
         if self.production_start and "--smoke-test" not in sys.argv:
             threading.Thread(
@@ -1004,7 +1201,9 @@ class CaptionApp:
     def _set_window_icon(self) -> None:
         try:
             with Image.open(resource_path("assets/qianyi-app-icon.png")) as source:
-                self._app_icon_photo = ImageTk.PhotoImage(source.convert("RGBA"))
+                self._app_icon_photo = ImageTk.PhotoImage(
+                    source.convert("RGBA"), master=self.root
+                )
             self.root.iconphoto(True, self._app_icon_photo)
         except (OSError, RuntimeError, ValueError, tk.TclError):
             self._app_icon_photo = None
@@ -1015,7 +1214,7 @@ class CaptionApp:
 
     def _load_toolbar_icons(self) -> None:
         icon_keys = (
-            "project", "image", "video", "platform", "system", "night", "day"
+            "project", "image", "video", "single", "platform", "system", "night", "day"
         )
         for theme_key in THEMES:
             theme_icons = {}
@@ -1027,7 +1226,7 @@ class CaptionApp:
                         )
                     ) as source:
                         theme_icons[icon_key] = ImageTk.PhotoImage(
-                            source.convert("RGBA")
+                            source.convert("RGBA"), master=self.root
                         )
                 except (OSError, RuntimeError, ValueError, tk.TclError):
                     continue
@@ -1044,23 +1243,24 @@ class CaptionApp:
                     resource_path(f"assets/provider-icons/{provider_key}.png")
                 ) as source:
                     self.provider_icons[provider_key] = ImageTk.PhotoImage(
-                        source.convert("RGBA")
+                        source.convert("RGBA"), master=self.root
                     )
             except (OSError, RuntimeError, ValueError, tk.TclError):
                 continue
         if "custom" not in self.provider_icons and "connection" in self.provider_icons:
             self.provider_icons["custom"] = self.provider_icons["connection"]
 
-    def _configure_style(self) -> None:
+    def _configure_style(self, apply_global_palette: bool = True) -> None:
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        self._apply_tk_palette()
+        self._apply_tk_palette(apply_global_palette)
         ui_font = UI_FONT
-        text_font = (ui_font, 10)
-        small_font = (ui_font, 9)
-        medium_font = (ui_font, 10, "bold")
-        title_font = (ui_font, 16, "bold")
+        text_font = (ui_font, UI_TEXT_SIZE)
+        small_font = (ui_font, UI_SMALL_SIZE)
+        medium_font = (ui_font, UI_MEDIUM_SIZE, "bold")
+        title_font = (ui_font, UI_TITLE_SIZE, "bold")
+        input_font = (ui_font, UI_INPUT_SIZE)
         self.root.configure(background=COLORS["bg"])
         style.configure(".", background=COLORS["bg"], foreground=COLORS["text"], font=text_font)
         style.configure("TFrame", background=COLORS["bg"])
@@ -1068,6 +1268,14 @@ class CaptionApp:
         style.configure("SectionCard.TFrame", background=COLORS["surface"])
         style.configure("Topbar.TFrame", background=COLORS["topbar"])
         style.configure("SideRail.TFrame", background=COLORS["surface"])
+        style.configure("StatusBar.TFrame", background=COLORS["surface_alt"])
+        style.configure(
+            "StatusPill.TFrame",
+            background=COLORS["surface"],
+            bordercolor=COLORS["border"],
+            borderwidth=1,
+            relief=tk.SOLID,
+        )
         style.configure("TLabel", background=COLORS["bg"], foreground=COLORS["text"])
         style.configure("Surface.TLabel", background=COLORS["surface"], foreground=COLORS["text"])
         style.configure(
@@ -1080,7 +1288,7 @@ class CaptionApp:
             "DialogTitle.TLabel",
             background=COLORS["surface"],
             foreground=COLORS["text"],
-            font=(ui_font, 15, "bold"),
+            font=(ui_font, 17, "bold"),
         )
         style.configure(
             "DialogField.TLabel",
@@ -1102,13 +1310,25 @@ class CaptionApp:
         )
         style.configure("Muted.TLabel", foreground=COLORS["muted"])
         style.configure("Title.TLabel", foreground=COLORS["text"], font=title_font)
-        style.configure("SectionTitle.TLabel", foreground=COLORS["text"], font=(ui_font, 12, "bold"))
-        style.configure("CenterTitle.TLabel", foreground=COLORS["text"], font=(ui_font, 19, "bold"))
-        style.configure("TopbarTitle.TLabel", background=COLORS["topbar"], foreground=COLORS["text"], font=(ui_font, 14, "bold"))
-        style.configure("TopbarBrand.TLabel", background=COLORS["topbar"], foreground=COLORS["accent"], font=(LATIN_FONT, 9, "bold"))
+        style.configure("SectionTitle.TLabel", foreground=COLORS["text"], font=(ui_font, UI_SECTION_SIZE, "bold"))
+        style.configure("CenterTitle.TLabel", foreground=COLORS["text"], font=(ui_font, 22, "bold"))
+        style.configure("TopbarTitle.TLabel", background=COLORS["topbar"], foreground=COLORS["text"], font=(ui_font, 17, "bold"))
+        style.configure("TopbarBrand.TLabel", background=COLORS["topbar"], foreground=COLORS["accent"], font=(LATIN_FONT, UI_SMALL_SIZE, "bold"))
         style.configure("TopbarMuted.TLabel", background=COLORS["topbar"], foreground=COLORS["muted"])
-        style.configure("AlertTitle.TLabel", foreground=COLORS["warning"], font=(ui_font, 16, "bold"))
-        style.configure("Brand.TLabel", foreground=COLORS["accent"], font=(LATIN_FONT, 9, "bold"))
+        style.configure(
+            "StatusBar.TLabel",
+            background=COLORS["surface_alt"],
+            foreground=COLORS["muted"],
+            font=small_font,
+        )
+        style.configure(
+            "StatusBackend.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["accent"],
+            font=medium_font,
+        )
+        style.configure("AlertTitle.TLabel", foreground=COLORS["warning"], font=(ui_font, 19, "bold"))
+        style.configure("Brand.TLabel", foreground=COLORS["accent"], font=(LATIN_FONT, UI_SMALL_SIZE, "bold"))
         style.configure("Stage.TLabel", foreground=COLORS["muted"], font=small_font)
         style.configure("StageActive.TLabel", foreground=COLORS["accent"], font=medium_font)
         style.configure("Billing.TLabel", foreground=COLORS["warning"], font=medium_font)
@@ -1118,6 +1338,21 @@ class CaptionApp:
         style.configure("StatusPending.TLabel", foreground=COLORS["info"], font=medium_font)
         style.configure("StatusSuccess.TLabel", foreground=COLORS["success"], font=medium_font)
         style.configure("StatusError.TLabel", foreground=COLORS["danger"], font=medium_font)
+        for progress_style, color in (
+            ("StatusCpu.Horizontal.TProgressbar", COLORS["accent"]),
+            ("StatusGpu.Horizontal.TProgressbar", COLORS["semantic_violet"]),
+            ("StatusMemory.Horizontal.TProgressbar", COLORS["success"]),
+            ("StatusTemperature.Horizontal.TProgressbar", COLORS["danger"]),
+        ):
+            style.configure(
+                progress_style,
+                troughcolor=COLORS["input_disabled"],
+                background=color,
+                bordercolor=COLORS["surface_alt"],
+                lightcolor=color,
+                darkcolor=color,
+                thickness=7,
+            )
         style.configure("SemanticBlue.TLabel", background=COLORS["semantic_blue"], foreground="#ffffff", font=("Segoe UI Symbol", 11, "bold"), anchor=tk.CENTER)
         style.configure("SemanticYellow.TLabel", background=COLORS["semantic_yellow"], foreground="#171715", font=("Segoe UI Symbol", 11, "bold"), anchor=tk.CENTER)
         style.configure("SemanticRed.TLabel", background=COLORS["semantic_red"], foreground="#ffffff", font=("Segoe UI Symbol", 11, "bold"), anchor=tk.CENTER)
@@ -1152,7 +1387,7 @@ class CaptionApp:
             "NavActive.TButton", padding=(8, 10), background=COLORS["selection"],
             foreground=COLORS["accent"], bordercolor=COLORS["accent"],
             borderwidth=1, relief=tk.FLAT,
-            font=(ui_font, 9, "bold"),
+            font=(ui_font, UI_SMALL_SIZE, "bold"),
         )
         style.map(
             "NavActive.TButton",
@@ -1189,13 +1424,13 @@ class CaptionApp:
         style.map("Icon.TButton", background=[("active", COLORS["hover"])])
         style.configure(
             "Provider.TMenubutton",
-            padding=(10, 6),
+            padding=(10, 3),
             background=COLORS["input_readonly"],
             foreground=COLORS["text"],
             bordercolor=COLORS["input_border"],
             borderwidth=1,
             relief=tk.FLAT,
-            font=text_font,
+            font=input_font,
         )
         style.map(
             "Provider.TMenubutton",
@@ -1251,7 +1486,7 @@ class CaptionApp:
                 })],
             })],
         )
-        style.configure("TEntry", padding=(9, 7), **form_options)
+        style.configure("TEntry", padding=(9, 2), font=input_font, **form_options)
         style.map(
             "TEntry",
             fieldbackground=[
@@ -1265,8 +1500,8 @@ class CaptionApp:
             foreground=[("disabled", COLORS["disabled_fg"])],
         )
         style.configure(
-            "TCombobox", padding=(9, 6), arrowcolor=COLORS["muted"],
-            arrowsize=14, **form_options,
+            "TCombobox", padding=(9, 1), arrowcolor=COLORS["muted"],
+            arrowsize=14, font=input_font, **form_options,
         )
         style.layout(
             "TCombobox",
@@ -1305,8 +1540,8 @@ class CaptionApp:
             ],
         )
         style.configure(
-            "TSpinbox", padding=(8, 6), arrowcolor=COLORS["muted"],
-            arrowsize=12, **form_options,
+            "TSpinbox", padding=(8, 1), arrowcolor=COLORS["muted"],
+            arrowsize=12, font=input_font, **form_options,
         )
         style.layout(
             "TSpinbox",
@@ -1347,7 +1582,7 @@ class CaptionApp:
         # Popup Listboxes are synchronized explicitly because ttk caches them
         # after the first opening. The option database covers newly created
         # popdowns, while ``_sync_combobox_popdowns`` repairs existing ones.
-        self.root.option_add("*TCombobox*Listbox.font", text_font, "interactive")
+        self.root.option_add("*TCombobox*Listbox.font", input_font, "interactive")
         indicator_options = {
             "indicatorcolor": COLORS["input_bg"],
             "indicatorrelief": tk.FLAT,
@@ -1490,30 +1725,78 @@ class CaptionApp:
         )
         style.configure("TSeparator", background=COLORS["border"])
 
-    def _apply_tk_palette(self) -> None:
+    def _adaptive_typography(self, _event=None, force: bool = False) -> None:
+        """Keep form values readable while a user resizes the workbench.
+
+        The main workbench uses a stable reading scale.  Only dense form
+        controls step between three size buckets, so a narrow window avoids
+        clipping while a normal or maximized window keeps the larger value
+        text the user expects.  Bucket changes are guarded to avoid resize
+        feedback loops.
+        """
+        if self.closing:
+            return
+        try:
+            width = int(self.root.winfo_width())
+        except (tk.TclError, TypeError, ValueError):
+            return
+        if width <= 1:
+            # Hidden roots are used during startup and in headless UI tests.
+            # Use the normal readable size until the real window is mapped.
+            bucket, size = "large", UI_INPUT_SIZE
+        elif width < 1180:
+            bucket, size = "compact", 14
+        elif width < 1500:
+            bucket, size = "medium", 15
+        else:
+            bucket, size = "large", UI_INPUT_SIZE
+        if not force and bucket == self._typography_bucket:
+            return
+        self._typography_bucket = bucket
+        font = (UI_FONT, size)
+        try:
+            style = ttk.Style(self.root)
+            for style_name in ("TEntry", "TCombobox", "TSpinbox", "Provider.TMenubutton"):
+                style.configure(style_name, font=font)
+            self.root.option_add("*TCombobox*Listbox.font", font, "interactive")
+            for widget in self._walk_widget_tree():
+                if isinstance(
+                    widget,
+                    (ttk.Entry, ttk.Combobox, ttk.Spinbox, ttk.Menubutton),
+                ):
+                    try:
+                        widget.configure(font=font)
+                    except tk.TclError:
+                        pass
+            self._sync_combobox_popdowns()
+        except tk.TclError:
+            pass
+
+    def _apply_tk_palette(self, apply_global_palette: bool = True) -> None:
         """Keep classic Tk widgets on the same palette as ttk.
 
         Windows can repaint Text/Listbox widgets from the process palette after
         a ttk theme change. Updating the classic palette first prevents an old
         day/night color from being restored during a later expose event.
         """
-        try:
-            self.root.tk.call(
-                "tk_setPalette",
-                "background", COLORS["bg"],
-                "foreground", COLORS["text"],
-                "activeBackground", COLORS["hover"],
-                "activeForeground", COLORS["text"],
-                "selectBackground", COLORS["selection"],
-                "selectForeground", COLORS["text"],
-                "highlightColor", COLORS["input_focus"],
-                "highlightBackground", COLORS["input_border"],
-                "insertBackground", COLORS["text"],
-                "disabledForeground", COLORS["disabled_fg"],
-                "troughColor", COLORS["surface"],
-            )
-        except tk.TclError:
-            pass
+        if apply_global_palette:
+            try:
+                self.root.tk.call(
+                    "tk_setPalette",
+                    "background", COLORS["bg"],
+                    "foreground", COLORS["text"],
+                    "activeBackground", COLORS["hover"],
+                    "activeForeground", COLORS["text"],
+                    "selectBackground", COLORS["selection"],
+                    "selectForeground", COLORS["text"],
+                    "highlightColor", COLORS["input_focus"],
+                    "highlightBackground", COLORS["input_border"],
+                    "insertBackground", COLORS["text"],
+                    "disabledForeground", COLORS["disabled_fg"],
+                    "troughColor", COLORS["surface"],
+                )
+            except tk.TclError:
+                pass
         for pattern, value in (
             ("*Text.background", COLORS["input_bg"]),
             ("*Text.foreground", COLORS["text"]),
@@ -1599,6 +1882,7 @@ class CaptionApp:
                 image=self._toolbar_icon(theme_key),
                 command=lambda key=theme_key: self._set_theme(key),
             )
+            button.image = self._toolbar_icon(theme_key)
             button.pack(side=tk.LEFT, padx=(0, 4) if theme_key == "night" else 0)
             self.theme_buttons[theme_key].append(button)
             ToolTip(button, tooltip)
@@ -1616,6 +1900,7 @@ class CaptionApp:
                     image=icon,
                     text="" if icon else fallback,
                 )
+                button.image = icon
 
     def _refresh_toolbar_icons(self) -> None:
         if not hasattr(self, "nav_buttons"):
@@ -1624,38 +1909,89 @@ class CaptionApp:
             ("project", "项目中心", "⌂"),
             ("image", "图像打标", "▧"),
             ("video", "视频反推", "▶"),
+            ("single", "单次反推", "✦"),
             ("platform", "平台设置", "☷"),
             ("system", "系统说明", "ⓘ"),
         ):
             icon = self._toolbar_icon(icon_key)
-            self.nav_buttons[icon_key].configure(
-                image=icon,
-                text=label if icon else f"{fallback}\n{label}",
-            )
+            button = self.nav_buttons.get(icon_key)
+            if button is not None:
+                button.configure(
+                    image=icon,
+                    text=label if icon else f"{fallback}\n{label}",
+                )
+                button.image = icon
         self._refresh_system_nav_icons()
+        self._refresh_single_nav_icons()
+
+    def _set_window_redraw(self, enabled: bool) -> None:
+        """Freeze native painting while a complete theme palette is applied."""
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.root.winfo_id())
+            ctypes.windll.user32.SendMessageW(
+                hwnd, 0x000B, 1 if enabled else 0, 0  # WM_SETREDRAW
+            )
+            if enabled:
+                ctypes.windll.user32.RedrawWindow(
+                    hwnd,
+                    None,
+                    None,
+                    0x0080 | 0x0100 | 0x0200,  # FRAME|INVALIDATE|UPDATENOW
+                )
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            pass
 
     def _set_theme(self, theme_key: str) -> None:
         normalized = theme_key if theme_key in THEMES else DEFAULT_THEME_KEY
-        self.theme_key = activate_theme(normalized)
-        self.settings["theme"] = self.theme_key
-        self._apply_tk_palette()
-        self._configure_style()
-        self._apply_native_theme()
-        self._refresh_toolbar_icons()
-        self._refresh_theme_buttons()
-        self._schedule_theme_sync()
+        # Drop any deferred palette/layout work queued by a view change. If it
+        # runs after this synchronous switch, Windows paints the old palette
+        # for a second pass and the transition looks sluggish.
+        self._cancel_theme_sync_jobs()
+        self._cancel_text_sync_jobs()
+        self._set_window_redraw(False)
+        try:
+            self.theme_key = activate_theme(normalized)
+            self.settings["theme"] = self.theme_key
+            # Reconfigure ttk and native widgets in-place.  Re-running
+            # tk_setPalette here repaints every widget in the process and is
+            # what made the theme switch visibly crawl on Windows.
+            self._configure_style(apply_global_palette=False)
+            self._apply_native_theme()
+            self._refresh_toolbar_icons()
+            self._refresh_theme_buttons()
+            self._adaptive_typography(force=True)
+        finally:
+            self._set_window_redraw(True)
 
     def _apply_native_theme(self) -> None:
         self.root.configure(background=COLORS["bg"])
         self.gallery.canvas.configure(background=COLORS["bg"])
         self.gallery.content.configure(background=COLORS["bg"])
-        self.gallery.render()
+        self.gallery.apply_theme()
         self.prompt_form_canvas.configure(background=COLORS["bg"])
         self.task_settings_canvas.configure(background=COLORS["bg"])
         self.preview_viewport.configure(background=COLORS["media_bg"])
         self.preview_label.configure(
             background=COLORS["media_bg"], foreground=COLORS["muted"]
         )
+        for canvas, color_key in (
+            (getattr(self, "single_image_canvas", None), "media_bg"),
+            (getattr(self, "single_media_canvas", None), "media_bg"),
+            (getattr(self, "single_editor_preview_canvas", None), "media_bg"),
+            (getattr(self, "single_timeline_canvas", None), "input_readonly"),
+        ):
+            if canvas is not None:
+                canvas.configure(background=COLORS[color_key])
+        if (
+            hasattr(self, "single_image_canvas")
+            and getattr(self, "single_reverse_frame", None) is not None
+            and self.single_reverse_frame.winfo_manager() == "pack"
+        ):
+            self._render_single_image()
+            self._render_single_media_preview()
+            self._render_single_timeline()
         for label, tone in self.semantic_icon_labels:
             label.configure(
                 background=COLORS[f"semantic_{tone}"],
@@ -1678,6 +2014,41 @@ class CaptionApp:
             self.prompt_form_canvas.configure(
                 scrollregion=bounds or (0, 0, 0, 0)
             )
+        except tk.TclError:
+            pass
+
+    def _left_platform_mousewheel(self, event):
+        """Scroll the complete left inspector without changing field values."""
+        canvas = getattr(self, "left_platform_canvas", None)
+        if canvas is None:
+            return None
+        try:
+            if not canvas.winfo_ismapped():
+                return None
+            first, last = canvas.yview()
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                delta = 120 if getattr(event, "num", 0) == 4 else -120
+            units = max(1, abs(int(delta)) // 120)
+            if delta > 0:
+                if first <= 0.0:
+                    return "break"
+                canvas.yview_scroll(-units, "units")
+            else:
+                if last >= 1.0:
+                    return "break"
+                canvas.yview_scroll(units, "units")
+        except tk.TclError:
+            return None
+        return "break"
+
+    def _bind_left_platform_wheel(self, widget) -> None:
+        """Install wheel handling on every child of the left inspector."""
+        try:
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(sequence, self._left_platform_mousewheel, add="+")
+            for child in widget.winfo_children():
+                self._bind_left_platform_wheel(child)
         except tk.TclError:
             pass
 
@@ -1707,6 +2078,22 @@ class CaptionApp:
         canvas.yview_scroll(-units if event.delta > 0 else units, "units")
         return "break"
 
+    def _prompt_text_mousewheel(self, event, widget: tk.Text):
+        try:
+            if not widget.winfo_ismapped():
+                return "break"
+            first, last = widget.yview()
+        except tk.TclError:
+            return "break"
+        units = max(1, abs(int(event.delta)) // 120)
+        if event.delta > 0 and first > 0.0:
+            widget.yview_scroll(-units, "units")
+            return "break"
+        if event.delta < 0 and last < 1.0:
+            widget.yview_scroll(units, "units")
+            return "break"
+        return self._prompt_form_mousewheel(event)
+
     def _task_settings_content_resized(self, _event=None) -> None:
         try:
             bounds = self.task_settings_canvas.bbox("all")
@@ -1724,7 +2111,7 @@ class CaptionApp:
         except tk.TclError:
             pass
 
-    def _task_settings_mousewheel(self, event):
+    def _task_settings_mousewheel(self, event, force: bool = False):
         canvas = self.task_settings_canvas
         try:
             if not canvas.winfo_ismapped():
@@ -1733,7 +2120,7 @@ class CaptionApp:
             pointer_y = canvas.winfo_pointery()
             left = canvas.winfo_rootx()
             top = canvas.winfo_rooty()
-            if not (
+            if not force and not (
                 left <= pointer_x < left + canvas.winfo_width()
                 and top <= pointer_y < top + canvas.winfo_height()
             ):
@@ -1763,7 +2150,12 @@ class CaptionApp:
 
     def _form_control_mousewheel(self, event):
         if hasattr(self, "task_settings_canvas"):
-            self._task_settings_mousewheel(event)
+            # Class bindings receive the event before Tk's native combobox or
+            # spinbox handler.  Force the inspector scroll here so the wheel
+            # never changes a selected option, even when the pointer is over a
+            # child element whose coordinates are reported differently on DPI
+            # scaled Windows desktops.
+            self._task_settings_mousewheel(event, force=True)
         return "break"
 
     def _refresh_task_settings_scroll(self, show_bottom: bool = False) -> None:
@@ -1935,12 +2327,138 @@ class CaptionApp:
             subtitle.pack(anchor=tk.W, pady=(1, 0))
 
     def _layout_system_features(self, event) -> None:
+        try:
+            if self.system_info_canvas.winfo_width() <= 1:
+                return
+        except tk.TclError:
+            return
         wraplength = max(250, (event.width - 70) // 2)
         if wraplength == self._system_features_wraplength:
             return
         self._system_features_wraplength = wraplength
         for label in self.system_feature_descriptions:
             label.configure(wraplength=wraplength)
+
+    def _layout_runtime_portals(self, width: int) -> None:
+        try:
+            if self.system_info_canvas.winfo_width() <= 1:
+                return
+        except tk.TclError:
+            return
+        wraplength = max(180, (int(width) - 50) // 2)
+        for label in getattr(self, "system_runtime_descriptions", ()):
+            label.configure(wraplength=wraplength)
+
+    def _layout_system_update_state(self, event) -> None:
+        label = getattr(self, "system_update_state_label", None)
+        if label is None:
+            return
+        try:
+            if self.system_info_canvas.winfo_width() <= 1:
+                return
+        except tk.TclError:
+            return
+        try:
+            date_width = self.system_release_date_label.winfo_reqwidth()
+            label.configure(wraplength=max(220, int(event.width) - date_width - 24))
+        except tk.TclError:
+            pass
+
+    def _system_info_content_resized(self, _event=None) -> None:
+        try:
+            if self.system_info_canvas.winfo_width() <= 1:
+                return
+        except tk.TclError:
+            return
+        try:
+            bounds = self.system_info_canvas.bbox("all")
+            self.system_info_canvas.configure(
+                scrollregion=bounds or (0, 0, 0, 0)
+            )
+        except tk.TclError:
+            pass
+
+    def _system_info_canvas_resized(self, event) -> None:
+        try:
+            if (
+                int(getattr(event, "width", 0)) <= 1
+            ):
+                return
+            self.system_info_canvas.itemconfigure(
+                self.system_info_window_id,
+                width=max(1, int(event.width)),
+            )
+            self._system_info_content_resized()
+        except tk.TclError:
+            pass
+
+    def _fit_system_info_content(self) -> None:
+        """Stretch the embedded system-info surface to the visible canvas."""
+        if self.closing:
+            return
+        try:
+            canvas = self.system_info_canvas
+            if not canvas.winfo_exists():
+                return
+            width = int(canvas.winfo_width())
+            if width <= 1:
+                return
+            canvas.itemconfigure(self.system_info_window_id, width=width)
+            self._system_info_content_resized()
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
+    def _system_info_mousewheel(self, event):
+        canvas = getattr(self, "system_info_canvas", None)
+        if canvas is None:
+            return None
+        try:
+            first, last = canvas.yview()
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                delta = 120 if getattr(event, "num", 0) == 4 else -120
+            units = max(1, abs(int(delta)) // 120)
+            if delta > 0:
+                if first <= 0.0:
+                    return "break"
+                canvas.yview_scroll(-units, "units")
+            else:
+                if last >= 1.0:
+                    return "break"
+                canvas.yview_scroll(units, "units")
+        except tk.TclError:
+            return None
+        return "break"
+
+    def _bind_system_info_wheel(self, widget) -> None:
+        try:
+            # Let the release-notes Text widget keep its own internal scroll.
+            if isinstance(widget, tk.Text):
+                return
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(sequence, self._system_info_mousewheel, add="+")
+            for child in widget.winfo_children():
+                self._bind_system_info_wheel(child)
+        except tk.TclError:
+            pass
+
+    def open_local_runtime_portal(self, runtime_key: str) -> None:
+        info = LOCAL_RUNTIME_PORTALS.get(runtime_key)
+        if not info:
+            return
+        try:
+            opened = webbrowser.open(info["url"], new=2)
+        except OSError as error:
+            messagebox.showerror(
+                "无法打开下载页", str(error), parent=self.root
+            )
+            return
+        if not opened:
+            messagebox.showinfo(
+                "下载地址",
+                f"请在浏览器中访问：\n{info['url']}",
+                parent=self.root,
+            )
 
     def _semantic_heading(
         self,
@@ -1980,22 +2498,118 @@ class CaptionApp:
         self.launch_frame = tk.Frame(self.view_host, background="#090d1d")
         self.project_center_frame = ttk.Frame(self.view_host)
         self.workspace_frame = ttk.Frame(self.view_host)
+        self.single_reverse_frame = ttk.Frame(self.view_host)
         self.system_info_frame = ttk.Frame(self.view_host)
         self._build_launch_view()
         self._build_project_center()
         self._build_system_info()
 
-        status_host = ttk.Frame(self.workspace_frame, padding=(12, 3, 12, 5))
+        status_host = ttk.Frame(
+            self.workspace_frame,
+            style="StatusBar.TFrame",
+            padding=(12, 6),
+        )
         status_host.pack(side=tk.BOTTOM, fill=tk.X)
-        ttk.Separator(status_host).pack(fill=tk.X, pady=(0, 4))
+        self.status_host = status_host
         self.platform_status_var = tk.StringVar(value="火山引擎")
+        self.footer_platform_var = tk.StringVar(value="火山引擎")
+        backend_pill = ttk.Frame(
+            status_host,
+            style="StatusPill.TFrame",
+            padding=(12, 8),
+        )
+        backend_pill.pack(side=tk.LEFT)
         ttk.Label(
-            status_host, textvariable=self.platform_status_var, style="Muted.TLabel"
-        ).pack(side=tk.LEFT)
-        self.hardware_var = tk.StringVar(value="CPU --  |  内存 --  |  GPU --")
-        ttk.Label(
-            status_host, textvariable=self.hardware_var, style="Muted.TLabel"
-        ).pack(side=tk.RIGHT)
+            backend_pill,
+            textvariable=self.footer_platform_var,
+            style="StatusBackend.TLabel",
+        ).pack()
+
+        hardware_panel = ttk.Frame(status_host, style="StatusBar.TFrame")
+        hardware_panel.pack(side=tk.RIGHT)
+        self.cpu_percent_var = tk.DoubleVar(value=0)
+        self.gpu_percent_var = tk.DoubleVar(value=0)
+        self.memory_percent_var = tk.DoubleVar(value=0)
+        self.vram_percent_var = tk.DoubleVar(value=0)
+        self.cpu_temperature_var = tk.DoubleVar(value=0)
+        self.gpu_temperature_var = tk.DoubleVar(value=0)
+        self.cpu_metric_var = tk.StringVar(value="--")
+        self.gpu_metric_var = tk.StringVar(value="--")
+        self.memory_metric_var = tk.StringVar(value="--")
+        self.vram_metric_var = tk.StringVar(value="--")
+        self.cpu_temperature_metric_var = tk.StringVar(value="--")
+        self.gpu_temperature_metric_var = tk.StringVar(value="--")
+
+        def status_metric(
+            row: int,
+            column: int,
+            label: str,
+            progress_variable: tk.DoubleVar,
+            text_variable: tk.StringVar,
+            progress_style: str,
+        ) -> None:
+            metric = ttk.Frame(hardware_panel, style="StatusBar.TFrame")
+            metric.grid(
+                row=row,
+                column=column,
+                sticky=tk.EW,
+                padx=(8 if column else 0, 0),
+                pady=(0, 3) if row == 0 else (3, 0),
+            )
+            ttk.Label(
+                metric,
+                text=label,
+                # The previous 9-character slot was just wide enough for the
+                # old 11px font.  It clips CJK labels and icon-prefixed labels
+                # after the workbench readability scale is applied.
+                width=10,
+                anchor=tk.W,
+                style="StatusBar.TLabel",
+            ).pack(side=tk.LEFT)
+            ttk.Progressbar(
+                metric,
+                variable=progress_variable,
+                maximum=100,
+                length=50,
+                mode="determinate",
+                style=progress_style,
+            ).pack(side=tk.LEFT, padx=(2, 4))
+            ttk.Label(
+                metric,
+                textvariable=text_variable,
+                # Reserve one extra character for values such as 17.7/64G
+                # and 100%, preventing the rightmost glyph from being cut.
+                width=9,
+                anchor=tk.W,
+                style="StatusBar.TLabel",
+            ).pack(side=tk.LEFT)
+
+        status_metric(
+            0, 0, "⚙ CPU", self.cpu_percent_var, self.cpu_metric_var,
+            "StatusCpu.Horizontal.TProgressbar",
+        )
+        status_metric(
+            1, 0, "▣ GPU", self.gpu_percent_var, self.gpu_metric_var,
+            "StatusGpu.Horizontal.TProgressbar",
+        )
+        status_metric(
+            0, 1, "♨ CPU温度", self.cpu_temperature_var,
+            self.cpu_temperature_metric_var,
+            "StatusTemperature.Horizontal.TProgressbar",
+        )
+        status_metric(
+            1, 1, "▤ 显存", self.vram_percent_var, self.vram_metric_var,
+            "StatusGpu.Horizontal.TProgressbar",
+        )
+        status_metric(
+            0, 2, "▥ 内存", self.memory_percent_var, self.memory_metric_var,
+            "StatusMemory.Horizontal.TProgressbar",
+        )
+        status_metric(
+            1, 2, "♨ 显卡温度", self.gpu_temperature_var,
+            self.gpu_temperature_metric_var,
+            "StatusTemperature.Horizontal.TProgressbar",
+        )
 
         task_bar = ttk.Frame(
             self.workspace_frame, style="Surface.TFrame", padding=(12, 8)
@@ -2046,7 +2660,7 @@ class CaptionApp:
         export_button["menu"] = export_menu
         export_button.pack(side=tk.LEFT, padx=(6, 12))
         self.progress_var = tk.DoubleVar(value=0)
-        self.progress_text_var = tk.StringVar(value="就绪")
+        self.progress_text_var = tk.StringVar(value="")
         self.stats_var = tk.StringVar(value="总数 0  ·  成功 0  ·  跳过 0  ·  失败 0")
         task_status_row = ttk.Frame(task_bar, style="Surface.TFrame")
         task_status_row.pack(fill=tk.X, pady=(7, 0))
@@ -2115,16 +2729,17 @@ class CaptionApp:
             self.update_banner, text="×", width=3, command=self.dismiss_update_banner
         ).pack(side=tk.RIGHT)
 
-        body = ttk.Frame(self.workspace_frame)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        self.workspace_nav = ttk.Frame(
-            body, style="SideRail.TFrame", padding=(8, 12)
+        module_bar = ttk.Frame(
+            self.workspace_frame, style="Topbar.TFrame", padding=(12, 8)
         )
-        self.workspace_nav.pack(side=tk.LEFT, fill=tk.Y)
+        module_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
+        self.workspace_nav = ttk.Frame(module_bar, style="Topbar.TFrame")
+        self.workspace_nav.pack(side=tk.LEFT, padx=(10, 0))
         nav_specs = (
             ("project", "项目中心", "⌂", self.show_project_center),
             ("image", "图像打标", "▧", lambda: self.select_workflow("image")),
             ("video", "视频反推", "▶", lambda: self.select_workflow("video")),
+            ("single", "单次反推", "✦", self.show_single_reverse),
             ("platform", "平台设置", "☷", self.open_platform_config),
             ("system", "系统说明", "ⓘ", self.show_system_info),
         )
@@ -2133,14 +2748,14 @@ class CaptionApp:
             icon = self._toolbar_icon(key)
             button = ttk.Button(
                 self.workspace_nav,
-                text=label if icon else f"{fallback}\n{label}",
+                text=label if icon else f"{fallback} {label}",
                 image=icon,
-                compound=tk.TOP,
+                compound=tk.LEFT,
                 style="Nav.TButton",
-                width=9,
+                width=10,
                 command=command,
             )
-            button.pack(fill=tk.X, pady=(0, 8))
+            button.pack(side=tk.LEFT, padx=(0, 8))
             self.nav_buttons[key] = button
         self.nav_tooltips = [
             ToolTip(self.nav_buttons[key], label)
@@ -2148,21 +2763,264 @@ class CaptionApp:
                 ("project", "项目中心"),
                 ("image", "图像打标"),
                 ("video", "视频反推"),
+                ("single", "单次反推"),
                 ("platform", "平台设置"),
                 ("system", "系统说明"),
             )
         ]
         self.stage_labels = []
+        self.media_mode_var = tk.StringVar(value="image")
+        self.workflow_mode_var = tk.StringVar(value="图像打标")
+        self.caption_style_var = tk.StringVar(value="natural")
+        self.output_language_var = tk.StringVar(value="zh")
+        self.backend_var = tk.StringVar(value="api")
+        self.skip_var = tk.BooleanVar(value=True)
+        self.concurrency_var = tk.IntVar(value=3)
+        self.focus_label_var = tk.StringVar(value="训练主体")
+        self.trigger_word_var = tk.StringVar()
+        self.local_model_var = tk.StringVar()
+        self.local_runtime_var = tk.StringVar(value="huggingface")
+        self.lmstudio_base_url_var = tk.StringVar(
+            value="http://localhost:1234/v1"
+        )
+        self.lmstudio_model_var = tk.StringVar()
+        self.lmstudio_load_profile_var = tk.StringVar(
+            value=LMSTUDIO_LOAD_PROFILE_DEFAULT
+        )
+        self.llama_server_path_var = tk.StringVar()
+        self.llama_model_path_var = tk.StringVar()
+        self.llama_mmproj_path_var = tk.StringVar()
+        self.llama_model_alias_var = tk.StringVar()
+        self.llama_context_length_var = tk.IntVar(
+            value=LLAMA_CPP_DEFAULT_CONTEXT_LENGTH
+        )
+        self.llama_gpu_layers_var = tk.IntVar(
+            value=LLAMA_CPP_DEFAULT_GPU_LAYERS
+        )
+        self.enable_mtp_var = tk.BooleanVar(value=False)
+        self.remove_thinking_tags_var = tk.BooleanVar(value=True)
 
-        content = ttk.Frame(body, padding=(10, 10, 10, 8))
-        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        workspace = ttk.PanedWindow(content, orient=tk.HORIZONTAL)
+        body = ttk.Frame(self.workspace_frame, padding=(10, 10, 10, 8))
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        workspace = ttk.Frame(body)
         workspace.pack(fill=tk.BOTH, expand=True)
+        workspace.grid_rowconfigure(0, weight=1)
+        # Keep the inspector columns compact while giving the media canvas the
+        # most room.  Fixed minimums prevent the text-heavy side panels from
+        # being squeezed into clipped labels when the window is resized.
+        workspace.grid_columnconfigure(0, minsize=WORKSPACE_LEFT_WIDTH, weight=0)
+        workspace.grid_columnconfigure(1, minsize=WORKSPACE_CENTER_WIDTH, weight=1)
+        workspace.grid_columnconfigure(2, minsize=WORKSPACE_RIGHT_WIDTH, weight=0)
         self.workspace = workspace
-        table_panel = ttk.Frame(workspace)
-        preview_panel = ttk.Frame(workspace, padding=(10, 0, 0, 0))
-        workspace.add(table_panel, weight=7)
-        workspace.add(preview_panel, weight=3)
+
+        left_panel = ttk.Frame(workspace, padding=(0, 0, 12, 0))
+        left_panel.grid(row=0, column=0, sticky="nsew")
+        table_panel = ttk.Frame(workspace, padding=(0, 0, 10, 0))
+        table_panel.grid(row=0, column=1, sticky="nsew")
+        # Give the result inspector a predictable compact width so the middle
+        # media area receives the extra room instead of the notebook's natural
+        # requested width taking it all back.
+        preview_panel = ttk.Frame(workspace, width=WORKSPACE_RIGHT_WIDTH)
+        preview_panel.pack_propagate(False)
+        preview_panel.grid(row=0, column=2, sticky="nsew")
+
+        left_scroll_host = ttk.Frame(left_panel)
+        left_scroll_host.pack(fill=tk.BOTH, expand=True)
+        self.left_platform_canvas = tk.Canvas(
+            left_scroll_host,
+            background=COLORS["bg"],
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=False,
+        )
+        self.left_platform_scrollbar = ttk.Scrollbar(
+            left_scroll_host,
+            orient=tk.VERTICAL,
+            command=self.left_platform_canvas.yview,
+        )
+        self.left_platform_canvas.configure(
+            yscrollcommand=self.left_platform_scrollbar.set
+        )
+        self.left_platform_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.left_platform_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        left_content = ttk.Frame(self.left_platform_canvas)
+        left_content_window_id = self.left_platform_canvas.create_window(
+            (0, 0), window=left_content, anchor=tk.NW
+        )
+        left_content.bind(
+            "<Configure>",
+            lambda _event: self.left_platform_canvas.configure(
+                scrollregion=self.left_platform_canvas.bbox("all")
+            ),
+        )
+        self.left_platform_canvas.bind(
+            "<Configure>",
+            lambda event: self.left_platform_canvas.itemconfigure(
+                left_content_window_id, width=event.width
+            ),
+        )
+        platform_card = ttk.Frame(
+            left_content, style="Surface.TFrame", padding=(14, 12)
+        )
+        platform_card.pack(fill=tk.X, pady=(0, 10))
+        platform_head = self._semantic_heading(
+            platform_card,
+            "☷",
+            "平台设置",
+            "blue",
+            "运行后端与模型",
+        )
+        platform_head.pack(fill=tk.X)
+        platform_actions = ttk.Frame(platform_head, style="Surface.TFrame")
+        platform_actions.pack(side=tk.RIGHT)
+        ttk.Button(
+            platform_actions,
+            text="完整设置",
+            command=self.open_platform_config,
+        ).pack(side=tk.RIGHT)
+        platform_form = ttk.Frame(platform_card)
+        platform_form.pack(fill=tk.X, pady=(10, 0))
+        self.provider_label_var = tk.StringVar()
+        self.model_label_var = tk.StringVar()
+        self.billing_var = tk.StringVar()
+
+        backend_row = ttk.Frame(platform_form)
+        backend_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(
+            backend_row, text="运行方式", style="Surface.TLabel", width=10
+        ).pack(side=tk.LEFT)
+        backend_choices = ttk.Frame(backend_row, style="Surface.TFrame")
+        backend_choices.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Radiobutton(
+            backend_choices,
+            text="外部 API",
+            value="api",
+            variable=self.backend_var,
+            style="Surface.TRadiobutton",
+            command=self._backend_changed,
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            backend_choices,
+            text="本地模型",
+            value="local",
+            variable=self.backend_var,
+            style="Surface.TRadiobutton",
+            command=self._backend_changed,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        provider_row = ttk.Frame(platform_form)
+        provider_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(provider_row, text="服务商", style="Surface.TLabel", width=10).pack(
+            side=tk.LEFT
+        )
+        self.provider_box = ttk.Combobox(
+            provider_row,
+            textvariable=self.provider_label_var,
+            state="readonly",
+            values=[API_PROVIDERS[key].label for key in PUBLIC_PROVIDER_KEYS],
+            width=20,
+        )
+        self.provider_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.provider_box.bind("<<ComboboxSelected>>", self._provider_changed)
+
+        model_row = ttk.Frame(platform_form)
+        model_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(model_row, text="模型", style="Surface.TLabel", width=10).pack(
+            side=tk.LEFT
+        )
+        self.model_box = ttk.Combobox(
+            model_row,
+            textvariable=self.model_label_var,
+            state="readonly",
+            values=[model.label for model in MODELS.values()],
+            width=20,
+        )
+        self.model_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.model_box.bind("<<ComboboxSelected>>", self._model_changed)
+
+        endpoint_row = ttk.Frame(platform_form)
+        self.endpoint_row = endpoint_row
+        self.endpoint_label = ttk.Label(
+            endpoint_row, text="接口地址", style="Surface.TLabel", width=10
+        )
+        self.custom_endpoint_var = tk.StringVar()
+        self.endpoint_box = ttk.Combobox(
+            endpoint_row,
+            textvariable=self.custom_endpoint_var,
+            state="readonly",
+            values=(),
+            width=20,
+        )
+        self.endpoint_box.bind("<<ComboboxSelected>>", self._endpoint_changed)
+
+        local_row = ttk.Frame(platform_form)
+        local_row.pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(
+            local_row, text="本地模型", style="Surface.TLabel", width=10
+        ).pack(side=tk.LEFT)
+        self.local_model_entry = ttk.Entry(
+            local_row, textvariable=self.local_model_var
+        )
+        self.local_model_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.local_model_button = ttk.Button(
+            local_row, text="选择", command=self.browse_local_model
+        )
+        self.local_model_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        runtime_row = ttk.Frame(platform_form)
+        runtime_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(
+            runtime_row, text="本地方式", style="Surface.TLabel", width=10
+        ).pack(side=tk.LEFT)
+        self.local_runtime_label_var = tk.StringVar(
+            value=LOCAL_RUNTIME_LABELS.get(
+                self.local_runtime_var.get(), "Hugging Face 本地目录"
+            )
+        )
+        self.local_runtime_box = ttk.Combobox(
+            runtime_row,
+            textvariable=self.local_runtime_label_var,
+            state="readonly",
+            values=list(LOCAL_RUNTIME_OPTIONS),
+        )
+        self.local_runtime_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def workspace_local_runtime_changed(_event=None) -> None:
+            self.local_runtime_var.set(
+                LOCAL_RUNTIME_OPTIONS.get(
+                    self.local_runtime_label_var.get(), "huggingface"
+                )
+            )
+            self._backend_changed()
+
+        self.local_runtime_box.bind(
+            "<<ComboboxSelected>>", workspace_local_runtime_changed
+        )
+        ttk.Label(
+            platform_card,
+            text="本地模式可切换 Hugging Face、LM Studio 和 llama.cpp。",
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Label(
+            platform_card,
+            textvariable=self.platform_status_var,
+            style="Muted.TLabel",
+            wraplength=320,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(10, 0))
+
+        self.sampling_shell = ttk.Frame(
+            left_content, style="Surface.TFrame", padding=(12, 10)
+        )
+        self.sampling_shell.pack(fill=tk.BOTH, expand=True)
+        self._build_sampling_panel(self.sampling_shell)
+        self.sampling_tab = self.sampling_shell
+        # Bind every control in the left inspector, so the wheel scrolls the
+        # inspector instead of changing a combobox/spinbox value.
+        self._bind_left_platform_wheel(left_panel)
 
         canvas_title = self._semantic_heading(
             table_panel, "▧", "素材画布", "yellow", "MEDIA CANVAS"
@@ -2300,7 +3158,7 @@ class CaptionApp:
         self.result_state_label.pack(fill=tk.X, pady=(0, 6))
         self.result_text = scrolledtext.ScrolledText(
             self.result_tab, width=34, wrap=tk.WORD,
-            font=(UI_FONT, 9),
+            font=(UI_FONT, UI_TEXT_SIZE),
         )
         self.result_text.pack(fill=tk.BOTH, expand=True)
         self._style_text(self.result_text)
@@ -2310,7 +3168,7 @@ class CaptionApp:
         self.preset_var = tk.StringVar()
         self.preset_box = ttk.Combobox(
             prompt_bar, textvariable=self.preset_var,
-            state="readonly", width=18,
+            state="readonly", width=14,
         )
         self.preset_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.preset_box.bind("<<ComboboxSelected>>", self.apply_preset)
@@ -2372,19 +3230,34 @@ class CaptionApp:
         self.prompt_user_label.pack(anchor=tk.W)
         self.user_prompt_text = scrolledtext.ScrolledText(
             self.prompt_form_content, height=4, wrap=tk.WORD,
-            font=(UI_FONT, 9),
+            font=(UI_FONT, UI_TEXT_SIZE),
         )
         self.user_prompt_text.pack(fill=tk.X, pady=(4, 8))
         self._style_text(self.user_prompt_text)
+        self.prompt_system_header = ttk.Frame(self.prompt_form_content)
+        self.prompt_system_header.pack(fill=tk.X)
         self.prompt_system_label = ttk.Label(
-            self.prompt_form_content, text="系统提示词模板"
+            self.prompt_system_header, text="系统提示词模板"
         )
-        self.prompt_system_label.pack(anchor=tk.W)
+        self.prompt_system_label.pack(side=tk.LEFT)
+        self.system_prompt_metric_var = tk.StringVar(
+            value="完整加载 · 0 字符 · 0 行"
+        )
+        self.system_prompt_metric_label = ttk.Label(
+            self.prompt_system_header,
+            textvariable=self.system_prompt_metric_var,
+            style="Muted.TLabel",
+        )
+        self.system_prompt_metric_label.pack(side=tk.RIGHT)
         self.system_prompt_text = scrolledtext.ScrolledText(
-            self.prompt_form_content, wrap=tk.WORD, font=(UI_FONT, 9)
+            self.prompt_form_content, wrap=tk.WORD, font=(UI_FONT, UI_TEXT_SIZE)
         )
         self.system_prompt_text.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         self._style_text(self.system_prompt_text)
+        self.system_prompt_text.bind(
+            "<<Modified>>", self._system_prompt_modified, add="+"
+        )
+        self.system_prompt_text.edit_modified(False)
         for widget in (
             self.prompt_form_canvas,
             self.prompt_form_content,
@@ -2392,37 +3265,23 @@ class CaptionApp:
             self.prompt_subject_label,
             self.subject_filter_entry,
             self.prompt_user_label,
-            self.user_prompt_text,
+            self.prompt_system_header,
             self.prompt_system_label,
-            self.system_prompt_text,
+            self.system_prompt_metric_label,
         ):
             widget.bind("<MouseWheel>", self._prompt_form_mousewheel)
+        for text_widget in (self.user_prompt_text, self.system_prompt_text):
+            text_widget.bind(
+                "<MouseWheel>",
+                lambda event, target=text_widget: self._prompt_text_mousewheel(
+                    event, target
+                ),
+            )
         self.log_text = scrolledtext.ScrolledText(
-            self.log_tab, width=34, wrap=tk.WORD, font=(MONO_FONT, 9)
+            self.log_tab, width=34, wrap=tk.WORD, font=(MONO_FONT, UI_MONO_SIZE)
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
         self._style_text(self.log_text)
-
-        self.media_mode_var = tk.StringVar(value="image")
-        self.workflow_mode_var = tk.StringVar(value="图像打标")
-        self.caption_style_var = tk.StringVar(value="natural")
-        self.output_language_var = tk.StringVar(value="zh")
-        self.backend_var = tk.StringVar(value="api")
-        self.skip_var = tk.BooleanVar(value=True)
-        self.concurrency_var = tk.IntVar(value=3)
-        self.focus_label_var = tk.StringVar(value="训练主体")
-        self.trigger_word_var = tk.StringVar()
-        self.local_model_var = tk.StringVar()
-        self.local_runtime_var = tk.StringVar(value="huggingface")
-        self.lmstudio_base_url_var = tk.StringVar(
-            value="http://localhost:1234/v1"
-        )
-        self.lmstudio_model_var = tk.StringVar()
-        self.lmstudio_load_profile_var = tk.StringVar(
-            value=LMSTUDIO_LOAD_PROFILE_DEFAULT
-        )
-        self.enable_mtp_var = tk.BooleanVar(value=False)
-        self.remove_thinking_tags_var = tk.BooleanVar(value=True)
 
         task_scroll_host = ttk.Frame(self.task_settings_tab)
         task_scroll_host.pack(fill=tk.BOTH, expand=True)
@@ -2523,6 +3382,9 @@ class CaptionApp:
             strategy, textvariable=self.focus_label_var, state="readonly",
             values=list(FOCUS_OPTIONS), width=16,
         )
+        self.focus_box.bind(
+            "<MouseWheel>", self._form_control_mousewheel, add="+"
+        )
         self.focus_box.grid(row=1, column=1, sticky=tk.EW, padx=(10, 0))
         ttk.Label(
             strategy, text="并发", style="Surface.TLabel"
@@ -2532,6 +3394,9 @@ class CaptionApp:
         self.concurrency_box = ttk.Spinbox(
             strategy, from_=1, to=MAX_CONCURRENCY, width=4,
             textvariable=self.concurrency_var,
+        )
+        self.concurrency_box.bind(
+            "<MouseWheel>", self._form_control_mousewheel, add="+"
         )
         self.concurrency_box.grid(row=1, column=3, sticky=tk.W, padx=(6, 0))
         ttk.Label(
@@ -2550,91 +3415,463 @@ class CaptionApp:
         strategy.grid_columnconfigure(1, weight=1)
 
         self.sampling_expanded = False
-        self._platform_control_host = ttk.Frame(self.workspace_frame)
-        self.sampling_shell = ttk.Frame(
-            self.task_settings_content, style="Surface.TFrame", padding=(10, 8)
-        )
-        self.sampling_shell.pack(fill=tk.X)
-        sampling_toggle = ttk.Frame(self.sampling_shell, style="Surface.TFrame")
-        sampling_toggle.pack(fill=tk.X)
-        self.sampling_toggle_button = ttk.Button(
-            sampling_toggle, text="›  高级采样参数",
-            command=self._toggle_sampling_panel,
-        )
-        self.sampling_toggle_button.pack(side=tk.LEFT)
-        self.sampling_summary_var = tk.StringVar(value="稳定标注")
-        ttk.Label(
-            sampling_toggle, textvariable=self.sampling_summary_var,
-            style="Surface.TLabel",
-        ).pack(side=tk.RIGHT)
-        self.sampling_body = ttk.Frame(
-            self.sampling_shell, style="Surface.TFrame"
-        )
-        self._build_sampling_panel(self.sampling_body)
-        self.sampling_tab = self.sampling_shell
-
-        # Provider/model controls stay stateful for the request pipeline, while
-        # their public configuration remains in Platform Settings.
-        self.provider_label_var = tk.StringVar()
-        self.provider_box = ttk.Combobox(
-            self._platform_control_host, textvariable=self.provider_label_var,
-            state="readonly", width=14,
-            values=[API_PROVIDERS[key].label for key in PUBLIC_PROVIDER_KEYS],
-        )
-        self.provider_box.bind("<<ComboboxSelected>>", self._provider_changed)
-        self.model_label_var = tk.StringVar()
-        self.model_box = ttk.Combobox(
-            self._platform_control_host, textvariable=self.model_label_var,
-            state="readonly", width=25,
-        )
-        self.model_box["values"] = [model.label for model in MODELS.values()]
-        self.model_box.bind("<<ComboboxSelected>>", self._model_changed)
-        self.billing_var = tk.StringVar()
-        self.local_model_entry = ttk.Entry(
-            self._platform_control_host, textvariable=self.local_model_var,
-            state=tk.DISABLED,
-        )
-        self.local_model_button = ttk.Button(
-            self._platform_control_host, text="选择",
-            command=self.browse_local_model, state=tk.DISABLED,
-        )
 
         self.export_menu = export_menu
         self.batch_menu = batch_menu
         self._register_themed_menu(self.export_menu, "surface")
         self._register_themed_menu(self.batch_menu, "surface")
+        self._build_single_reverse()
+
+    def _build_single_reverse(self) -> None:
+        topbar = ttk.Frame(
+            self.single_reverse_frame, style="Topbar.TFrame", padding=(18, 10)
+        )
+        topbar.pack(fill=tk.X)
+        title_block = ttk.Frame(topbar, style="Topbar.TFrame")
+        title_block.pack(side=tk.LEFT)
+        ttk.Label(
+            title_block,
+            text=f"{APP_TITLE} {APP_VERSION}",
+            style="TopbarTitle.TLabel",
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            title_block,
+            text="单次任务 · 无需建立项目，结果可独立保存",
+            style="TopbarMuted.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 0))
+        actions = ttk.Frame(topbar, style="Topbar.TFrame")
+        actions.pack(side=tk.RIGHT)
+        ttk.Button(
+            actions, text="平台设置", command=self.open_platform_config
+        ).pack(side=tk.LEFT)
+        self._build_theme_toggle(actions).pack(side=tk.LEFT, padx=(10, 0))
+
+        module_bar = ttk.Frame(
+            self.single_reverse_frame, style="Topbar.TFrame", padding=(12, 8)
+        )
+        module_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
+        nav_specs = (
+            ("project", "项目中心", self.show_project_center),
+            ("image", "图像打标", lambda: self.select_workflow("image")),
+            ("video", "视频反推", lambda: self.select_workflow("video")),
+            ("single", "单次反推", self.show_single_reverse),
+            ("platform", "平台设置", self.open_platform_config),
+            ("system", "系统说明", self.show_system_info),
+        )
+        self.single_nav_buttons = {}
+        for key, label, command in nav_specs:
+            button = ttk.Button(
+                module_bar,
+                text=label,
+                image=self._toolbar_icon(key),
+                compound=tk.LEFT,
+                style="NavActive.TButton" if key == "single" else "Nav.TButton",
+                width=10,
+                command=command,
+            )
+            button.pack(side=tk.LEFT, padx=(0, 8))
+            self.single_nav_buttons[key] = button
+
+        body = ttk.Frame(self.single_reverse_frame)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        content = ttk.Frame(body, padding=(20, 16, 20, 18))
+        content.pack(fill=tk.BOTH, expand=True)
+        page_head = ttk.Frame(content)
+        page_head.pack(fill=tk.X, pady=(0, 14))
+        heading = self._semantic_heading(
+            page_head,
+            "✦",
+            "单次反推",
+            "yellow",
+            "拖入一个素材，快速反推、检查并保存结果，不进入项目批处理。",
+        )
+        heading.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.single_mode_var = tk.StringVar(value="image")
+        mode_controls = ttk.Frame(page_head, style="Surface.TFrame", padding=3)
+        mode_controls.pack(side=tk.RIGHT)
+        self.single_mode_buttons = {}
+        for mode, label in (("image", "▧  图片"), ("media", "▷  音视频")):
+            button = ttk.Button(
+                mode_controls,
+                text=label,
+                width=11,
+                command=lambda value=mode: self._set_single_mode(value),
+            )
+            button.pack(side=tk.LEFT, padx=(0, 4) if mode == "image" else 0)
+            self.single_mode_buttons[mode] = button
+
+        self.single_progress_var = tk.DoubleVar(value=0)
+        self.single_progress_text_var = tk.StringVar(value="等待选择素材")
+        self.single_status_var = tk.StringVar(value="● 等待反推结果")
+        self.single_metrics_var = tk.StringVar(value="")
+        self.single_image_file_var = tk.StringVar(value="尚未选择图片")
+        self.single_media_file_var = tk.StringVar(value="尚未选择音视频")
+        self.single_media_meta_var = tk.StringVar(value="拖入或点击选择文件")
+        self.single_media_probe_var = tk.StringVar(value="选择音视频后读取时长与轨道")
+        self.single_platform_summary_var = tk.StringVar()
+        self.single_prompt_summary_var = tk.StringVar()
+        self.single_language_summary_var = tk.StringVar()
+
+        self.single_content_host = ttk.Frame(content)
+        self.single_content_host.pack(fill=tk.BOTH, expand=True)
+        self.single_image_frame = ttk.Frame(self.single_content_host)
+        self.single_media_frame = ttk.Frame(self.single_content_host)
+
+        image_workspace = ttk.PanedWindow(
+            self.single_image_frame, orient=tk.HORIZONTAL
+        )
+        image_workspace.pack(fill=tk.BOTH, expand=True)
+        image_input = ttk.Frame(image_workspace, style="Surface.TFrame", padding=14)
+        image_side = ttk.Frame(image_workspace, padding=(12, 0, 0, 0))
+        image_workspace.add(image_input, weight=3)
+        image_workspace.add(image_side, weight=2)
+        image_head = self._semantic_heading(
+            image_input, "1", "上传一张图片", "yellow", "单文件模式"
+        )
+        image_head.pack(fill=tk.X, pady=(0, 10))
+        self.single_image_canvas = tk.Canvas(
+            image_input,
+            height=500,
+            background=COLORS["media_bg"],
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.single_image_canvas.pack(fill=tk.BOTH, expand=True)
+        self.single_image_canvas.bind("<Button-1>", lambda _event: self.choose_single_image())
+        self.single_image_canvas.bind("<Configure>", lambda _event: self._render_single_image())
+        self._register_single_drop_target(self.single_image_canvas)
+        image_footer = ttk.Frame(image_input, style="Surface.TFrame")
+        image_footer.pack(fill=tk.X, pady=(9, 0))
+        ttk.Label(
+            image_footer,
+            text="支持 JPG / PNG / WEBP / GIF / HEIC\nCtrl+V 粘贴 · 拖放导入",
+            style="Muted.TLabel",
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            image_footer, text="● 仅在本机预处理", style="StatusSuccess.TLabel"
+        ).grid(row=0, column=1, sticky=tk.E)
+        image_footer.grid_columnconfigure(0, weight=1)
+
+        settings_card = ttk.Frame(image_side, style="Surface.TFrame", padding=14)
+        settings_card.pack(fill=tk.X, pady=(0, 12))
+        settings_head = self._semantic_heading(
+            settings_card, "2", "本次设置", "blue", "沿用平台设置"
+        )
+        settings_head.pack(fill=tk.X, pady=(0, 9))
+        for label, variable in (
+            ("平台与模型", self.single_platform_summary_var),
+            ("提示词模板", self.single_prompt_summary_var),
+            ("输出与清理", self.single_language_summary_var),
+        ):
+            row = ttk.Frame(settings_card, style="Surface.TFrame")
+            row.pack(fill=tk.X, pady=6)
+            ttk.Label(
+                row, text=label, style="SurfaceMuted.TLabel", width=11
+            ).pack(side=tk.LEFT)
+            ttk.Label(
+                row,
+                textvariable=variable,
+                style="Surface.TLabel",
+                anchor=tk.E,
+            ).pack(side=tk.RIGHT, fill=tk.X, expand=True)
+
+        image_result = ttk.Frame(image_side, style="Surface.TFrame", padding=14)
+        image_result.pack(fill=tk.BOTH, expand=True)
+        result_head = self._semantic_heading(
+            image_result, "3", "反推结果", "red", "可编辑"
+        )
+        result_head.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(
+            image_result,
+            textvariable=self.single_status_var,
+            style="SurfaceMuted.TLabel",
+        ).pack(fill=tk.X, pady=(0, 5))
+        self.single_image_result_text = scrolledtext.ScrolledText(
+            image_result, wrap=tk.WORD, font=(UI_FONT, UI_TEXT_SIZE), height=10
+        )
+        self.single_image_result_text.pack(fill=tk.BOTH, expand=True)
+        self._style_text(self.single_image_result_text)
+        ttk.Label(
+            image_result,
+            textvariable=self.single_metrics_var,
+            style="Muted.TLabel",
+        ).pack(fill=tk.X, pady=(6, 0))
+        ttk.Progressbar(
+            image_result,
+            variable=self.single_progress_var,
+            maximum=100,
+            mode="determinate",
+        ).pack(fill=tk.X, pady=(7, 0))
+        image_actions = ttk.Frame(image_result, style="Surface.TFrame")
+        image_actions.pack(fill=tk.X, pady=(9, 0))
+        self.single_image_run_button = ttk.Button(
+            image_actions,
+            text="开始单次反推",
+            style="Primary.TButton",
+            state=tk.DISABLED,
+            command=self.start_single_image_reverse,
+        )
+        self.single_image_run_button.pack(side=tk.RIGHT)
+        ttk.Button(
+            image_actions, text="保存结果", command=self.save_single_result
+        ).pack(side=tk.RIGHT, padx=(0, 7))
+        ttk.Button(
+            image_actions, text="复制结果", command=self.copy_single_result
+        ).pack(side=tk.RIGHT, padx=(0, 7))
+
+        media_workspace = ttk.PanedWindow(
+            self.single_media_frame, orient=tk.HORIZONTAL
+        )
+        media_workspace.pack(fill=tk.BOTH, expand=True)
+        media_input = ttk.Frame(media_workspace, style="Surface.TFrame", padding=14)
+        media_editor = ttk.Frame(media_workspace, padding=(12, 0, 0, 0))
+        media_workspace.add(media_input, weight=2)
+        media_workspace.add(media_editor, weight=3)
+        media_head = self._semantic_heading(
+            media_input, "1", "音视频输入", "yellow", "拖入或点击选择"
+        )
+        media_head.pack(fill=tk.X, pady=(0, 10))
+        self.single_media_canvas = tk.Canvas(
+            media_input,
+            height=420,
+            background=COLORS["media_bg"],
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.single_media_canvas.pack(fill=tk.BOTH, expand=True)
+        self.single_media_canvas.bind("<Button-1>", lambda _event: self.choose_single_media_file())
+        self.single_media_canvas.bind("<Configure>", lambda _event: self._render_single_media_preview())
+        self._register_single_drop_target(self.single_media_canvas)
+        media_file_card = ttk.Frame(media_input, style="SurfaceAlt.TFrame", padding=10)
+        media_file_card.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(
+            media_file_card,
+            textvariable=self.single_media_file_var,
+            style="Surface.TLabel",
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            media_file_card,
+            textvariable=self.single_media_meta_var,
+            style="SurfaceMuted.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 0))
+        ttk.Button(
+            media_input,
+            text="重新选择音视频",
+            command=self.choose_single_media_file,
+        ).pack(fill=tk.X, pady=(10, 0))
+
+        self.single_media_tabs = ttk.Notebook(media_editor)
+        self.single_media_tabs.pack(fill=tk.BOTH, expand=True)
+        editor_tab = ttk.Frame(self.single_media_tabs, padding=14)
+        media_result_tab = ttk.Frame(self.single_media_tabs, padding=14)
+        self.single_media_tabs.add(editor_tab, text="片段编辑器")
+        self.single_media_tabs.add(media_result_tab, text="反推结果")
+        editor_head = self._semantic_heading(
+            editor_tab, "2", "片段编辑器", "blue", "手工选择开始与结束位置"
+        )
+        editor_head.pack(fill=tk.X, pady=(0, 8))
+        editor_tools = ttk.Frame(editor_tab)
+        editor_tools.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(
+            editor_tools, text="播放选区", command=self.preview_single_media_selection
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            editor_tools, text="恢复全长", command=self.reset_single_media_selection
+        ).pack(side=tk.LEFT, padx=(7, 0))
+        self.single_include_audio_var = tk.BooleanVar(value=True)
+        self.single_audio_check = ttk.Checkbutton(
+            editor_tools,
+            text="保留音频",
+            variable=self.single_include_audio_var,
+        )
+        self.single_audio_check.pack(side=tk.RIGHT)
+        ttk.Label(
+            editor_tab,
+            textvariable=self.single_media_probe_var,
+            style="Muted.TLabel",
+        ).pack(fill=tk.X, pady=(0, 7))
+        self.single_editor_preview_canvas = tk.Canvas(
+            editor_tab,
+            height=190,
+            background=COLORS["media_bg"],
+            highlightthickness=0,
+        )
+        self.single_editor_preview_canvas.pack(fill=tk.X)
+        self.single_editor_preview_canvas.bind(
+            "<Configure>", lambda _event: self._render_single_media_preview()
+        )
+        self.single_timeline_canvas = tk.Canvas(
+            editor_tab,
+            height=88,
+            background=COLORS["input_readonly"],
+            highlightthickness=0,
+        )
+        self.single_timeline_canvas.pack(fill=tk.X, pady=(10, 8))
+        self.single_timeline_canvas.bind(
+            "<Configure>", lambda _event: self._render_single_timeline()
+        )
+        self.single_clip_start_var = tk.DoubleVar(value=0.0)
+        self.single_clip_end_var = tk.DoubleVar(value=1.0)
+        self.single_clip_start_text_var = tk.StringVar(value="00:00:00.0")
+        self.single_clip_end_text_var = tk.StringVar(value="00:00:01.0")
+        self.single_clip_duration_text_var = tk.StringVar(value="00:00:01.0")
+        self.single_clip_duration = 1.0
+        self.single_clip_updating = False
+        scale_grid = ttk.Frame(editor_tab)
+        scale_grid.pack(fill=tk.X)
+        scale_grid.grid_columnconfigure(1, weight=1)
+        ttk.Label(scale_grid, text="开始位置").grid(row=0, column=0, sticky=tk.W)
+        self.single_clip_start_scale = ttk.Scale(
+            scale_grid,
+            from_=0,
+            to=1,
+            variable=self.single_clip_start_var,
+            state=tk.DISABLED,
+            command=lambda _value: self._single_clip_changed("start"),
+        )
+        self.single_clip_start_scale.grid(row=0, column=1, sticky=tk.EW, padx=10)
+        ttk.Label(
+            scale_grid,
+            textvariable=self.single_clip_start_text_var,
+            style="Brand.TLabel",
+            width=12,
+        ).grid(row=0, column=2, sticky=tk.E)
+        ttk.Label(scale_grid, text="结束位置").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        self.single_clip_end_scale = ttk.Scale(
+            scale_grid,
+            from_=0,
+            to=1,
+            variable=self.single_clip_end_var,
+            state=tk.DISABLED,
+            command=lambda _value: self._single_clip_changed("end"),
+        )
+        self.single_clip_end_scale.grid(row=1, column=1, sticky=tk.EW, padx=10, pady=(8, 0))
+        ttk.Label(
+            scale_grid,
+            textvariable=self.single_clip_end_text_var,
+            style="Brand.TLabel",
+            width=12,
+        ).grid(row=1, column=2, sticky=tk.E, pady=(8, 0))
+        clip_summary = ttk.Frame(editor_tab, style="Surface.TFrame", padding=(10, 8))
+        clip_summary.pack(fill=tk.X, pady=(10, 0))
+        ttk.Label(
+            clip_summary, text="选中片段", style="SurfaceMuted.TLabel"
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            clip_summary,
+            textvariable=self.single_clip_duration_text_var,
+            style="Brand.TLabel",
+        ).pack(side=tk.RIGHT)
+        editor_actions = ttk.Frame(editor_tab)
+        editor_actions.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(
+            editor_actions,
+            text="原文件不会被修改，片段与 TXT 保存到独立目录。",
+            style="Muted.TLabel",
+        ).pack(side=tk.LEFT)
+        self.single_clip_reverse_button = ttk.Button(
+            editor_actions,
+            text="截取并反推",
+            style="Primary.TButton",
+            state=tk.DISABLED,
+            command=self.start_single_media_reverse,
+        )
+        self.single_clip_reverse_button.pack(side=tk.RIGHT)
+        self.single_clip_save_button = ttk.Button(
+            editor_actions,
+            text="仅截取保存",
+            state=tk.DISABLED,
+            command=self.save_single_media_clip,
+        )
+        self.single_clip_save_button.pack(side=tk.RIGHT, padx=(0, 7))
+
+        media_result_head = self._semantic_heading(
+            media_result_tab, "3", "反推结果", "red", "可编辑"
+        )
+        media_result_head.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(
+            media_result_tab,
+            textvariable=self.single_status_var,
+            style="SurfaceMuted.TLabel",
+        ).pack(fill=tk.X, pady=(0, 6))
+        self.single_media_result_text = scrolledtext.ScrolledText(
+            media_result_tab, wrap=tk.WORD, font=(UI_FONT, UI_TEXT_SIZE)
+        )
+        self.single_media_result_text.pack(fill=tk.BOTH, expand=True)
+        self._style_text(self.single_media_result_text)
+        ttk.Label(
+            media_result_tab,
+            textvariable=self.single_metrics_var,
+            style="Muted.TLabel",
+        ).pack(fill=tk.X, pady=(6, 0))
+        ttk.Progressbar(
+            media_result_tab,
+            variable=self.single_progress_var,
+            maximum=100,
+            mode="determinate",
+        ).pack(fill=tk.X, pady=(7, 0))
+        media_result_actions = ttk.Frame(media_result_tab)
+        media_result_actions.pack(fill=tk.X, pady=(9, 0))
+        ttk.Button(
+            media_result_actions, text="保存结果", command=self.save_single_result
+        ).pack(side=tk.RIGHT)
+        ttk.Button(
+            media_result_actions, text="复制结果", command=self.copy_single_result
+        ).pack(side=tk.RIGHT, padx=(0, 7))
+
+        self.single_action_buttons = [
+            self.single_image_run_button,
+            self.single_clip_reverse_button,
+            self.single_clip_save_button,
+        ]
+        self._set_single_mode("image")
+        self._update_single_settings_summary()
 
     def _build_sampling_panel(self, parent: ttk.Frame) -> None:
         self.sampling_support_var = tk.StringVar()
         heading = ttk.Frame(parent, style="Surface.TFrame")
         heading.pack(fill=tk.X, pady=(0, 7))
+        # Keep the value for internal compatibility, but do not render the
+        # redundant summary line beside the title.
+        self.sampling_summary_var = tk.StringVar(value="")
+        title_row = ttk.Frame(heading, style="Surface.TFrame")
+        title_row.pack(fill=tk.X)
         ttk.Label(
-            heading, text="采样参数", style="Title.TLabel"
+            title_row, text="采样参数", style="Title.TLabel"
+        ).pack(side=tk.LEFT)
+        actions = ttk.Frame(heading, style="Surface.TFrame")
+        actions.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(
+            actions, text="采样预设", style="SurfaceMuted.TLabel"
         ).pack(side=tk.LEFT)
         self.sampling_preset_var = tk.StringVar(value="平衡反推")
         self.sampling_preset_box = ttk.Combobox(
-            heading,
+            actions,
             textvariable=self.sampling_preset_var,
             state="readonly",
-            width=12,
+            width=16,
             values=list(SAMPLING_PRESETS),
         )
-        self.sampling_preset_box.pack(side=tk.RIGHT)
+        self.sampling_preset_box.pack(side=tk.LEFT, padx=(8, 0))
         self.sampling_preset_box.bind(
             "<<ComboboxSelected>>", self.apply_sampling_preset
         )
+        self.sampling_preset_box.bind(
+            "<MouseWheel>", self._form_control_mousewheel, add="+"
+        )
         self.sampling_reset_button = ttk.Button(
-            heading,
+            actions,
             text="↻",
             width=4,
             style="Icon.TButton",
             command=self.reset_sampling,
         )
-        self.sampling_reset_button.pack(side=tk.RIGHT, padx=(6, 0))
+        self.sampling_reset_button.pack(side=tk.LEFT, padx=(6, 0))
         self.sampling_reset_tooltip = ToolTip(
             self.sampling_reset_button, "恢复默认采样参数"
         )
-
         self.max_tokens_var = tk.IntVar(value=DEFAULT_SAMPLING["max_tokens"])
         self.temperature_var = tk.DoubleVar(value=DEFAULT_SAMPLING["temperature"])
         self.top_p_var = tk.DoubleVar(value=DEFAULT_SAMPLING["top_p"])
@@ -2662,14 +3899,39 @@ class CaptionApp:
             group = ttk.Frame(controls, style="Surface.TFrame")
             group.grid(
                 row=index // 2, column=index % 2, sticky=tk.EW,
-                padx=(0, 8) if index % 2 == 0 else (0, 0),
+                padx=(0, 0)
+                if label == "Seed"
+                else ((0, 8) if index % 2 == 0 else (0, 0)),
                 pady=(0, 7),
+                columnspan=2 if label == "Seed" else 1,
             )
             ttk.Label(
                 group, text=label, style="Surface.TLabel", anchor=tk.W
             ).pack(fill=tk.X)
             if minimum is None:
-                control = ttk.Entry(group, textvariable=variable, width=9)
+                seed_row = ttk.Frame(group, style="Surface.TFrame")
+                seed_row.pack(fill=tk.X, pady=(3, 0))
+                control = ttk.Entry(seed_row, textvariable=variable, width=9)
+                control.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                self.seed_random_button = ttk.Button(
+                    seed_row,
+                    text="⚅",
+                    width=3,
+                    style="Icon.TButton",
+                    command=self.randomize_sampling_seed,
+                )
+                self.seed_random_button.pack(side=tk.LEFT, padx=(6, 0))
+                self.seed_random_tooltip = ToolTip(
+                    self.seed_random_button, "随机生成种子"
+                )
+                self.sampling_save_button = ttk.Button(
+                    seed_row,
+                    text="保存参数",
+                    command=self.save_sampling_settings,
+                )
+                self.sampling_save_button.pack(side=tk.RIGHT, padx=(8, 0))
+                self.sampling_control_widgets[label] = control
+                self.seed_entry = control
             else:
                 control = ttk.Spinbox(
                     group,
@@ -2679,28 +3941,19 @@ class CaptionApp:
                     textvariable=variable,
                     width=9,
                 )
-            control.pack(fill=tk.X, pady=(3, 0))
-            self.sampling_control_widgets[label] = control
-            if label == "Seed":
-                self.seed_entry = control
+                control.pack(fill=tk.X, pady=(3, 0))
+                self.sampling_control_widgets[label] = control
+            control.bind(
+                "<MouseWheel>", self._form_control_mousewheel, add="+"
+            )
         for column in range(2):
             controls.grid_columnconfigure(column, weight=1, uniform="sampling")
         ttk.Label(
             parent,
             textvariable=self.sampling_support_var,
             style="Muted.TLabel",
-            wraplength=420,
+            wraplength=320,
         ).pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
-
-        self.custom_endpoint_var = tk.StringVar()
-        self.endpoint_box = ttk.Combobox(
-            self._platform_control_host,
-            textvariable=self.custom_endpoint_var,
-            state="readonly",
-            values=(),
-        )
-        self.endpoint_box.bind("<<ComboboxSelected>>", self._endpoint_changed)
-        self.custom_endpoint_entry = self.endpoint_box
 
     def _build_launch_view(self) -> None:
         self._launch_source = None
@@ -2735,7 +3988,8 @@ class CaptionApp:
         target_size = (width, height)
         if self._launch_photo is None or self._launch_photo_size != target_size:
             self._launch_photo = ImageTk.PhotoImage(
-                self._compose_launch_background(width, height)
+                self._compose_launch_background(width, height),
+                master=self.root,
             )
             self._launch_photo_size = target_size
         self.launch_canvas.create_image(
@@ -2755,7 +4009,9 @@ class CaptionApp:
             rendered_icon = ImageOps.fit(
                 self._launch_icon_source, icon_target, Image.Resampling.LANCZOS
             )
-            self._launch_icon_photo = ImageTk.PhotoImage(rendered_icon)
+            self._launch_icon_photo = ImageTk.PhotoImage(
+                rendered_icon, master=self.root
+            )
             self._launch_icon_photo_size = icon_target
         if self._launch_icon_photo is not None:
             self.launch_canvas.create_image(
@@ -2970,7 +4226,15 @@ class CaptionApp:
         ttk.Label(title_block, textvariable=self.project_count_var, style="TopbarMuted.TLabel").pack(anchor=tk.W, pady=(2, 0))
         actions = ttk.Frame(topbar, style="Topbar.TFrame")
         actions.pack(side=tk.RIGHT)
-        ttk.Button(actions, text="添加项目", style="Primary.TButton", command=self.add_project).pack(side=tk.LEFT)
+        ttk.Button(
+            actions,
+            text="单次反推",
+            style="Primary.TButton",
+            command=self.show_single_reverse,
+        ).pack(side=tk.LEFT)
+        ttk.Button(actions, text="添加项目", command=self.add_project).pack(
+            side=tk.LEFT, padx=(7, 0)
+        )
         self.return_project_button = ttk.Button(
             actions,
             text="返回当前项目",
@@ -3042,33 +4306,69 @@ class CaptionApp:
         ).pack(side=tk.LEFT)
         self._build_theme_toggle(actions).pack(side=tk.LEFT, padx=(10, 0))
 
-        body = ttk.Frame(self.system_info_frame)
-        body.pack(fill=tk.BOTH, expand=True)
-        rail = ttk.Frame(body, style="SideRail.TFrame", padding=(8, 12))
-        rail.pack(side=tk.LEFT, fill=tk.Y)
+        module_bar = ttk.Frame(
+            self.system_info_frame, style="Topbar.TFrame", padding=(12, 8)
+        )
+        module_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 8))
         nav_specs = (
             ("project", "项目中心", self.show_project_center),
             ("image", "图像打标", lambda: self.select_workflow("image")),
             ("video", "视频反推", lambda: self.select_workflow("video")),
+            ("single", "单次反推", self.show_single_reverse),
             ("platform", "平台设置", self.open_platform_config),
             ("system", "系统说明", self.show_system_info),
         )
         self.system_nav_buttons = {}
         for key, label, command in nav_specs:
             button = ttk.Button(
-                rail,
+                module_bar,
                 text=label,
                 image=self._toolbar_icon(key),
-                compound=tk.TOP,
+                compound=tk.LEFT,
                 style="NavActive.TButton" if key == "system" else "Nav.TButton",
-                width=9,
+                width=10,
                 command=command,
             )
-            button.pack(fill=tk.X, pady=(0, 8))
+            button.pack(side=tk.LEFT, padx=(0, 8))
             self.system_nav_buttons[key] = button
 
-        content = ttk.Frame(body, padding=(20, 18, 20, 18))
-        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        body = ttk.Frame(self.system_info_frame)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.system_info_canvas = tk.Canvas(
+            body,
+            background=COLORS["bg"],
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=False,
+        )
+        self.system_info_scrollbar = ttk.Scrollbar(
+            body,
+            orient=tk.VERTICAL,
+            command=self.system_info_canvas.yview,
+        )
+        self.system_info_canvas.configure(
+            yscrollcommand=self.system_info_scrollbar.set
+        )
+        self.system_info_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.system_info_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        content = ttk.Frame(
+            self.system_info_canvas, padding=(20, 18, 20, 18)
+        )
+        self.system_info_content = content
+        self.system_info_window_id = self.system_info_canvas.create_window(
+            (0, 0), window=content, anchor=tk.NW
+        )
+        content.bind(
+            "<Configure>", self._system_info_content_resized, add="+"
+        )
+        self.system_info_canvas.bind(
+            "<Configure>", self._system_info_canvas_resized, add="+"
+        )
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.system_info_canvas.bind(
+                sequence, self._system_info_mousewheel, add="+"
+            )
         intro = self._semantic_heading(
             content,
             "ⓘ",
@@ -3153,6 +4453,59 @@ class CaptionApp:
             justify=tk.LEFT,
         ).pack(fill=tk.X, pady=(9, 0))
 
+        runtime_panel = ttk.Frame(
+            content, style="Surface.TFrame", padding=(14, 12)
+        )
+        runtime_panel.pack(fill=tk.X, pady=(4, 10))
+        runtime_head = self._semantic_heading(
+            runtime_panel,
+            "⌁",
+            "本地运行组件",
+            "blue",
+            "DOWNLOADS & USAGE",
+        )
+        runtime_head.pack(fill=tk.X)
+        runtime_host = ttk.Frame(runtime_panel)
+        runtime_host.pack(fill=tk.X, pady=(10, 0))
+        self.system_runtime_descriptions = []
+        for column in range(2):
+            runtime_host.grid_columnconfigure(column, weight=1, uniform="runtime")
+        runtime_specs = (
+            ("lmstudio", "◉", "yellow"),
+            ("llamacpp", "⌘", "violet"),
+        )
+        for index, (runtime_key, symbol, tone) in enumerate(runtime_specs):
+            info = LOCAL_RUNTIME_PORTALS[runtime_key]
+            card = ttk.Frame(
+                runtime_host, style="SurfaceAlt.TFrame", padding=(12, 10)
+            )
+            card.grid(
+                row=0,
+                column=index,
+                sticky="nsew",
+                padx=(0, 6) if index == 0 else (6, 0),
+            )
+            heading = self._semantic_heading(card, symbol, info["title"], tone)
+            heading.pack(fill=tk.X)
+            description = ttk.Label(
+                card,
+                text=info["description"],
+                style="Surface.TLabel",
+                wraplength=420,
+                justify=tk.LEFT,
+            )
+            description.pack(fill=tk.X, pady=(8, 9))
+            self.system_runtime_descriptions.append(description)
+            ttk.Button(
+                card,
+                text=info["button"],
+                command=lambda key=runtime_key: self.open_local_runtime_portal(key),
+            ).pack(anchor=tk.W)
+        runtime_host.bind(
+            "<Configure>",
+            lambda event: self._layout_runtime_portals(event.width),
+        )
+
         version_panel = ttk.Frame(
             content, style="Surface.TFrame", padding=(14, 12)
         )
@@ -3183,16 +4536,27 @@ class CaptionApp:
         self.system_release_date_var = tk.StringVar(value="")
         state_row = ttk.Frame(version_panel, style="Surface.TFrame")
         state_row.pack(fill=tk.X, pady=(12, 8))
-        ttk.Label(
+        self.system_update_state_label = ttk.Label(
             state_row,
             textvariable=self.system_update_state_var,
             style="StageActive.TLabel",
-        ).pack(side=tk.LEFT)
-        ttk.Label(
+            anchor=tk.W,
+            justify=tk.LEFT,
+            wraplength=620,
+        )
+        self.system_update_state_label.pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+        self.system_release_date_label = ttk.Label(
             state_row,
             textvariable=self.system_release_date_var,
             style="Muted.TLabel",
-        ).pack(side=tk.RIGHT)
+            anchor=tk.E,
+        )
+        self.system_release_date_label.pack(side=tk.RIGHT, padx=(12, 0))
+        state_row.bind(
+            "<Configure>", self._layout_system_update_state, add="+"
+        )
 
         self.system_auto_update_var = tk.BooleanVar(
             value=bool(self.settings.get("auto_check_updates", True))
@@ -3210,19 +4574,21 @@ class CaptionApp:
             version_panel,
             height=8,
             wrap=tk.WORD,
-            font=(UI_FONT, 10),
+            font=(UI_FONT, UI_TEXT_SIZE),
         )
         self.system_release_notes.pack(fill=tk.BOTH, expand=True)
         self._style_text(self.system_release_notes, readonly=True)
         self._set_release_notes(
             "本版更新\n\n" + "\n".join(f"• {note}" for note in RELEASE_NOTES)
         )
+        self._bind_system_info_wheel(content)
 
     def _hide_views(self) -> None:
         for frame in (
             self.launch_frame,
             self.project_center_frame,
             self.workspace_frame,
+            self.single_reverse_frame,
             self.system_info_frame,
         ):
             frame.pack_forget()
@@ -3231,16 +4597,14 @@ class CaptionApp:
         if sys.platform != "win32":
             return
         try:
-            screen_width = self.root.winfo_screenwidth()
-            screen_height = self.root.winfo_screenheight()
-            width = max(320, min(1900, screen_width - 20))
-            height = max(240, min(1080, screen_height))
-            x = max(0, (screen_width - width) // 2)
-            y = max(0, (screen_height - height) // 2)
-            self.root.withdraw()
-            self.root.overrideredirect(True)
-            self.root.minsize(width, height)
-            self.root.geometry(f"{width}x{height}+{x}+{y}")
+            # The launch page and workspace now use separate tuned sizes so the
+            # hero image and inspector can breathe without crowding the text.
+            self.root.overrideredirect(False)
+            geometry = getattr(self, "launch_geometry", None)
+            if not geometry:
+                geometry = configure_launch_window(self.root)
+            self.root.minsize(*getattr(self, "launch_size", _geometry_size(geometry)))
+            self.root.geometry(geometry)
             self.root.configure(background="#090d1d")
             self.root.wm_attributes("-topmost", True)
         except tk.TclError:
@@ -3254,8 +4618,11 @@ class CaptionApp:
             self.root.wm_attributes("-topmost", False)
             self.root.configure(background=COLORS["bg"])
             self.root.state("normal")
-            self.root.minsize(1024, 720)
-            self.root.geometry(self.normal_geometry)
+            geometry = getattr(self, "normal_geometry", None)
+            if not geometry:
+                geometry = configure_main_window(self.root)
+            self.root.minsize(*getattr(self, "normal_size", _geometry_size(geometry)))
+            self.root.geometry(geometry)
         except tk.TclError:
             pass
 
@@ -3269,14 +4636,17 @@ class CaptionApp:
             except tk.TclError:
                 pass
         self.launch_progress = 0
-        self.root.update_idletasks()
-        self._render_launch()
         try:
             self.root.deiconify()
             self.root.state("normal")
             self.root.lift()
         except tk.TclError:
             pass
+        # Map the window before the first idle layout.  On DPI-aware Windows
+        # builds, updating a withdrawn Tk root here can block before any UI is
+        # painted, which looks like the EXE failed to open.
+        self.root.update_idletasks()
+        self._render_launch()
         self.splash_after_id = self.root.after(32, self._advance_launch_progress)
 
     def _advance_launch_progress(self) -> None:
@@ -3309,8 +4679,22 @@ class CaptionApp:
         self._restore_main_window()
         self.system_info_frame.pack(fill=tk.BOTH, expand=True)
         self._refresh_system_nav_icons()
+        self._fit_system_info_content()
+        self.root.after_idle(self._fit_system_info_content)
         if self.latest_release is not None:
             self._apply_release_to_system_info(self.latest_release)
+        self._schedule_theme_sync()
+
+    def show_single_reverse(self) -> None:
+        self._hide_views()
+        self._restore_main_window()
+        self.single_reverse_frame.pack(fill=tk.BOTH, expand=True)
+        self._update_single_settings_summary()
+        self._refresh_single_nav_icons()
+        self._set_single_mode(self.single_mode_var.get())
+        self.root.after_idle(self._render_single_image)
+        self.root.after_idle(self._render_single_media_preview)
+        self.root.after_idle(self._render_single_timeline)
         self._schedule_theme_sync()
 
     def _save_auto_update_preference(self) -> None:
@@ -3359,10 +4743,23 @@ class CaptionApp:
         if not hasattr(self, "system_nav_buttons"):
             return
         for key, button in self.system_nav_buttons.items():
+            icon = self._toolbar_icon(key)
             button.configure(
-                image=self._toolbar_icon(key),
+                image=icon,
                 style="NavActive.TButton" if key == "system" else "Nav.TButton",
             )
+            button.image = icon
+
+    def _refresh_single_nav_icons(self) -> None:
+        if not hasattr(self, "single_nav_buttons"):
+            return
+        for key, button in self.single_nav_buttons.items():
+            icon = self._toolbar_icon(key)
+            button.configure(
+                image=icon,
+                style="NavActive.TButton" if key == "single" else "Nav.TButton",
+            )
+            button.image = icon
 
     def _run_automatic_backup(self) -> None:
         try:
@@ -3856,7 +5253,7 @@ class CaptionApp:
         self.result_text.delete("1.0", tk.END)
         self.log_text.delete("1.0", tk.END)
         self.progress_var.set(0)
-        self.progress_text_var.set("就绪")
+        self.progress_text_var.set("")
         self._set_stage(1)
         self._restore_idle_controls()
 
@@ -3896,6 +5293,7 @@ class CaptionApp:
             menu.configure(
                 background=background,
                 foreground=COLORS["text"],
+                font=(UI_FONT, UI_INPUT_SIZE),
                 activebackground=active_background,
                 activeforeground=COLORS["text"],
                 disabledforeground=COLORS["disabled_fg"],
@@ -3940,6 +5338,8 @@ class CaptionApp:
             combobox.tk.call(
                 listbox,
                 "configure",
+                "-font",
+                (UI_FONT, UI_INPUT_SIZE),
                 "-background",
                 COLORS["input_bg"],
                 "-foreground",
@@ -3977,6 +5377,18 @@ class CaptionApp:
 
     def _register_combobox_theme(self, combobox: ttk.Combobox) -> None:
         if combobox not in self._bound_comboboxes:
+            def queue_popdown_style(_event=None, target=combobox):
+                # ttk creates the native Listbox after the mouse/key event has
+                # propagated.  Styling immediately is therefore racy on
+                # Windows; one idle pass catches both newly-created and cached
+                # popdowns without adding a visible transition delay.
+                try:
+                    self.root.after_idle(
+                        lambda: self._style_combobox_popdown(target)
+                    )
+                except tk.TclError:
+                    pass
+
             for sequence in (
                 "<ButtonPress-1>",
                 "<KeyPress-F4>",
@@ -3984,9 +5396,7 @@ class CaptionApp:
             ):
                 combobox.bind(
                     sequence,
-                    lambda _event, target=combobox: self._style_combobox_popdown(
-                        target
-                    ),
+                    queue_popdown_style,
                     add="+",
                 )
             self._bound_comboboxes.add(combobox)
@@ -4098,19 +5508,11 @@ class CaptionApp:
                 selectbackground=palette["selection"],
                 selectforeground=palette["text"],
             )
-        try:
-            widget.tk.call(
-                widget._w,
-                "configure",
-                "-background", field_background,
-                "-foreground", palette["text"],
-                "-insertbackground", palette["text"],
-                "-selectbackground", palette["selection"],
-                "-selectforeground", palette["text"],
-            )
-            widget.event_generate("<Expose>", when="tail")
-        except tk.TclError:
-            pass
+        # ``configure`` above already invalidates the native text control.
+        # Generating a synthetic Expose event here used to force Windows to
+        # repaint, but it also re-triggered the Visibility/Focus synchronizer
+        # while Tk was draining idle callbacks.  That feedback loop is what
+        # made theme changes appear to stall on some machines.
 
     @staticmethod
     def _text_widget_matches_palette(
@@ -4216,26 +5618,20 @@ class CaptionApp:
         if self.closing:
             return
         self._cancel_theme_sync_jobs()
+        # View changes and newly-created native widgets can safely synchronize
+        # after Tk finishes mapping them. Theme buttons themselves use the
+        # synchronous path in ``_set_theme``; keeping this helper idle-only
+        # avoids constructing every combobox popdown while the window is still
+        # being built.
+        after_id = None
 
-        def schedule(delay: int | None) -> None:
-            after_id = None
+        def sync() -> None:
+            self._theme_sync_after_ids.discard(after_id)
+            if not self.closing:
+                self._sync_native_theme_widgets()
 
-            def sync() -> None:
-                self._theme_sync_after_ids.discard(after_id)
-                if not self.closing:
-                    self._sync_native_theme_widgets()
-
-            after_id = (
-                self.root.after_idle(sync)
-                if delay is None
-                else self.root.after(delay, sync)
-            )
-            self._theme_sync_after_ids.add(after_id)
-
-        # Tk and Windows can repaint cached native widgets after the ttk theme
-        # pass. Verify the active palette both immediately and after mapping.
-        for delay in (None, 20, 80, 220, 650):
-            schedule(delay)
+        after_id = self.root.after_idle(sync)
+        self._theme_sync_after_ids.add(after_id)
 
     def _cancel_theme_sync_jobs(self) -> None:
         for after_id in tuple(self._theme_sync_after_ids):
@@ -4310,10 +5706,18 @@ class CaptionApp:
 
     def _set_initial_sash(self) -> None:
         self.sash_after_id = None
-        width = self.workspace.winfo_width()
-        if width > 100:
-            # Reserve enough inspector width for full model names and form labels.
-            self.workspace.sashpos(0, min(int(width * 0.70), width - 410))
+        try:
+            self.workspace.grid_columnconfigure(
+                0, minsize=WORKSPACE_LEFT_WIDTH, weight=0
+            )
+            self.workspace.grid_columnconfigure(
+                1, minsize=WORKSPACE_CENTER_WIDTH, weight=1
+            )
+            self.workspace.grid_columnconfigure(
+                2, minsize=WORKSPACE_RIGHT_WIDTH, weight=0
+            )
+        except tk.TclError:
+            pass
 
     def _load_values(self) -> None:
         self.folder_var.set(self.settings.get("last_folder", ""))
@@ -4345,6 +5749,16 @@ class CaptionApp:
             self.settings.get(
                 "lmstudio_load_profile", LMSTUDIO_LOAD_PROFILE_DEFAULT
             )
+        )
+        self.llama_server_path_var.set(self.settings.get("llama_server_path", ""))
+        self.llama_model_path_var.set(self.settings.get("llama_model_path", ""))
+        self.llama_mmproj_path_var.set(self.settings.get("llama_mmproj_path", ""))
+        self.llama_model_alias_var.set(self.settings.get("llama_model_alias", ""))
+        self.llama_context_length_var.set(
+            int(self.settings.get("llama_context_length", LLAMA_CPP_DEFAULT_CONTEXT_LENGTH))
+        )
+        self.llama_gpu_layers_var.set(
+            int(self.settings.get("llama_gpu_layers", LLAMA_CPP_DEFAULT_GPU_LAYERS))
         )
         focus = self.settings.get("labeling_focus", "subject")
         self.focus_label_var.set(FOCUS_LABELS.get(focus, "训练主体"))
@@ -4394,6 +5808,10 @@ class CaptionApp:
             if self.local_runtime_var.get() == "lmstudio":
                 model = self.lmstudio_model_var.get().strip() or "未选择模型"
                 return f"LM Studio / {model}"
+            if self.local_runtime_var.get() == "llamacpp":
+                model_path = self.llama_model_path_var.get().strip()
+                model = Path(model_path).name if model_path else "未选择 GGUF"
+                return f"llama.cpp / {model}"
             folder = self.local_model_var.get().strip()
             model = Path(folder).name if folder else "未选择模型目录"
             return f"Hugging Face 本地模型 / {model}"
@@ -4477,6 +5895,24 @@ class CaptionApp:
                 )
             ),
         )
+        show_endpoint = bool(
+            provider.allows_custom_endpoint and self.backend_var.get() == "api"
+        )
+        if show_endpoint:
+            if self.endpoint_row.winfo_manager() != "pack":
+                self.endpoint_row.pack(
+                    fill=tk.X,
+                    pady=(0, 8),
+                    before=self.local_model_entry.master,
+                )
+            if self.endpoint_label.winfo_manager() != "pack":
+                self.endpoint_label.pack(side=tk.LEFT)
+            if self.endpoint_box.winfo_manager() != "pack":
+                self.endpoint_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        else:
+            self.endpoint_label.pack_forget()
+            self.endpoint_box.pack_forget()
+            self.endpoint_row.pack_forget()
         self._model_changed()
         supported = [
             name
@@ -4520,21 +5956,27 @@ class CaptionApp:
         if hasattr(self, "sampling_summary_var"):
             self.sampling_summary_var.set(
                 f"{self.sampling_preset_var.get()}  ·  "
-                f"Tokens {sampling['max_tokens']}  ·  T {sampling['temperature']:g}"
+                f"{sampling['max_tokens']} tokens  ·  T{sampling['temperature']:g}"
             )
 
     def _toggle_sampling_panel(self, expanded: bool | None = None) -> None:
-        target = not self.sampling_expanded if expanded is None else bool(expanded)
-        self.sampling_expanded = target
-        if target:
-            self.sampling_body.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-            self.sampling_toggle_button.configure(text="⌄  高级采样参数")
-        else:
-            self.sampling_body.pack_forget()
-            self.sampling_toggle_button.configure(text="›  高级采样参数")
-        self.root.after_idle(
-            lambda: self._refresh_task_settings_scroll(show_bottom=target)
+        self.sampling_expanded = (
+            not self.sampling_expanded if expanded is None else bool(expanded)
         )
+
+    def save_sampling_settings(self) -> None:
+        self._set_sampling_values(self._sampling_values())
+        self._save_workspace_settings()
+        self.log("采样参数已保存")
+        messagebox.showinfo(
+            "参数已保存",
+            "采样参数已保存，后续反推将使用当前设置。",
+            parent=self.root,
+        )
+
+    def randomize_sampling_seed(self) -> None:
+        self.seed_var.set(str(secrets.randbelow(2_147_483_648)))
+        self._set_sampling_values(self._sampling_values())
 
     def apply_sampling_preset(self, _event=None) -> None:
         values = SAMPLING_PRESETS.get(self.sampling_preset_var.get())
@@ -4551,14 +5993,103 @@ class CaptionApp:
             if self.local_runtime_var.get() == "lmstudio":
                 model = self.lmstudio_model_var.get().strip() or "未选择模型"
                 platform = f"LM Studio · {model}"
+                footer_platform = "◉  LM Studio"
+            elif self.local_runtime_var.get() == "llamacpp":
+                model_path = self.llama_model_path_var.get().strip()
+                model = Path(model_path).name if model_path else "未选择 GGUF"
+                platform = f"llama.cpp · {model}"
+                footer_platform = "◉  llama.cpp"
             else:
                 folder = self.local_model_var.get().strip()
                 platform = f"Hugging Face · {Path(folder).name if folder else '未选择目录'}"
+                footer_platform = "◉  Hugging Face"
         else:
             provider = API_PROVIDERS[self._provider_key()]
             model = self._api_model() or "未选择模型"
             platform = f"{provider.label} · {model}"
+            footer_platform = f"◉  {provider.label}"
         self.platform_status_var.set(f"{mode}  |  {platform}")
+        self.footer_platform_var.set(footer_platform)
+        self._update_single_settings_summary()
+
+    @staticmethod
+    def _set_status_variable(variable, value) -> None:
+        try:
+            current = variable.get()
+        except tk.TclError:
+            return
+        if current != value:
+            variable.set(value)
+
+    def _set_hardware_metric(
+        self,
+        progress_variable: tk.DoubleVar,
+        text_variable: tk.StringVar,
+        percent: float | None,
+        text: str,
+    ) -> None:
+        bounded = 0.0 if percent is None else max(0.0, min(100.0, float(percent)))
+        self._set_status_variable(progress_variable, bounded)
+        self._set_status_variable(text_variable, text)
+
+    def _apply_hardware_sample(self, sample: dict) -> None:
+        cpu = sample.get("cpu_percent")
+        self._set_hardware_metric(
+            self.cpu_percent_var,
+            self.cpu_metric_var,
+            cpu,
+            "--" if cpu is None else f"{float(cpu):.0f}%",
+        )
+        cpu_temperature = sample.get("cpu_temperature_c")
+        self._set_hardware_metric(
+            self.cpu_temperature_var,
+            self.cpu_temperature_metric_var,
+            cpu_temperature,
+            "--" if cpu_temperature is None else f"{float(cpu_temperature):.0f}°C",
+        )
+
+        memory = sample.get("memory") if isinstance(sample.get("memory"), dict) else {}
+        memory_percent = memory.get("percent")
+        memory_used = memory.get("used_gb")
+        memory_total = memory.get("total_gb")
+        memory_text = "--"
+        if memory_used is not None and memory_total is not None:
+            memory_text = f"{float(memory_used):.1f}/{float(memory_total):.0f}G"
+        self._set_hardware_metric(
+            self.memory_percent_var,
+            self.memory_metric_var,
+            memory_percent,
+            memory_text,
+        )
+
+        gpu = sample.get("gpu") if isinstance(sample.get("gpu"), dict) else {}
+        gpu_percent = gpu.get("percent")
+        self._set_hardware_metric(
+            self.gpu_percent_var,
+            self.gpu_metric_var,
+            gpu_percent,
+            "--" if gpu_percent is None else f"{float(gpu_percent):.0f}%",
+        )
+        vram_used = gpu.get("memory_used_mb")
+        vram_total = gpu.get("memory_total_mb")
+        vram_percent = None
+        vram_text = "--"
+        if vram_used is not None and vram_total:
+            vram_percent = float(vram_used) / float(vram_total) * 100.0
+            vram_text = f"{float(vram_used) / 1024:.1f}/{float(vram_total) / 1024:.0f}G"
+        self._set_hardware_metric(
+            self.vram_percent_var,
+            self.vram_metric_var,
+            vram_percent,
+            vram_text,
+        )
+        gpu_temperature = gpu.get("temperature_c")
+        self._set_hardware_metric(
+            self.gpu_temperature_var,
+            self.gpu_temperature_metric_var,
+            gpu_temperature,
+            "--" if gpu_temperature is None else f"{float(gpu_temperature):.0f}°C",
+        )
 
     def _set_nav_active(self, key: str) -> None:
         for name, button in self.nav_buttons.items():
@@ -4589,14 +6120,14 @@ class CaptionApp:
 
     def show_sampling_panel(self) -> None:
         self.show_workspace()
-        self.right_tabs.select(self.task_settings_tab)
-        self._toggle_sampling_panel(True)
         self._set_nav_active("video" if self.media_mode_var.get() == "video" else "image")
+        self.root.after_idle(self.sampling_preset_box.focus_set)
 
     def _backend_changed(self) -> None:
         is_local = self.backend_var.get() == "local"
         is_huggingface = self.local_runtime_var.get() == "huggingface"
-        is_lmstudio = is_local and not is_huggingface
+        is_lmstudio = is_local and self.local_runtime_var.get() == "lmstudio"
+        is_llamacpp = is_local and self.local_runtime_var.get() == "llamacpp"
         self.provider_box.configure(state=tk.DISABLED if is_local else "readonly")
         if is_local:
             self.model_box.configure(state=tk.DISABLED)
@@ -4615,6 +6146,10 @@ class CaptionApp:
         self.local_model_button.configure(
             state=tk.NORMAL if is_local and is_huggingface else tk.DISABLED
         )
+        if hasattr(self, "local_runtime_box"):
+            self.local_runtime_box.configure(
+                state="readonly" if is_local else tk.DISABLED
+            )
         self.endpoint_box.configure(
             state=(
                 tk.NORMAL
@@ -4622,6 +6157,24 @@ class CaptionApp:
                 else ("readonly" if not is_local else tk.DISABLED)
             )
         )
+        show_endpoint = bool(
+            not is_local and API_PROVIDERS[self._provider_key()].allows_custom_endpoint
+        )
+        if show_endpoint:
+            if self.endpoint_row.winfo_manager() != "pack":
+                self.endpoint_row.pack(
+                    fill=tk.X,
+                    pady=(0, 8),
+                    before=self.local_model_entry.master,
+                )
+            if self.endpoint_label.winfo_manager() != "pack":
+                self.endpoint_label.pack(side=tk.LEFT)
+            if self.endpoint_box.winfo_manager() != "pack":
+                self.endpoint_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        else:
+            self.endpoint_label.pack_forget()
+            self.endpoint_box.pack_forget()
+            self.endpoint_row.pack_forget()
         if is_local:
             self.billing_var.set("本地 / 不计费")
         else:
@@ -4637,6 +6190,10 @@ class CaptionApp:
             self.sampling_support_var.set(
                 "LM Studio 使用服务端采样设置；工作台仅附加 "
                 f"{LMSTUDIO_CAPTION_TOKEN_LIMIT} token 输出安全上限"
+            )
+        elif is_llamacpp:
+            self.sampling_support_var.set(
+                "llama.cpp 使用工作台采样参数；模型由本机 llama-server 运行"
             )
         elif is_local:
             self.sampling_support_var.set(
@@ -4666,9 +6223,780 @@ class CaptionApp:
         if selected:
             self.local_model_var.set(selected)
 
+    def _update_system_prompt_metrics(self) -> None:
+        value = self.system_prompt_text.get("1.0", "end-1c")
+        line_count = value.count("\n") + 1 if value else 0
+        self.system_prompt_metric_var.set(
+            f"完整加载 · {len(value):,} 字符 · {line_count:,} 行"
+        )
+
+    def _system_prompt_modified(self, _event=None) -> None:
+        try:
+            if not self.system_prompt_text.edit_modified():
+                return
+            self.system_prompt_text.edit_modified(False)
+        except tk.TclError:
+            return
+        self._update_system_prompt_metrics()
+
     def _set_system_prompt(self, value: str) -> None:
         self.system_prompt_text.delete("1.0", tk.END)
         self.system_prompt_text.insert("1.0", value)
+        self.system_prompt_text.mark_set(tk.INSERT, "1.0")
+        self.system_prompt_text.xview_moveto(0.0)
+        self.system_prompt_text.yview_moveto(0.0)
+        self.system_prompt_text.edit_modified(False)
+        self._update_system_prompt_metrics()
+
+    def _set_single_mode(self, mode: str) -> None:
+        if mode not in {"image", "media"}:
+            mode = "image"
+        self.single_mode_var.set(mode)
+        self.single_image_frame.pack_forget()
+        self.single_media_frame.pack_forget()
+        target = self.single_image_frame if mode == "image" else self.single_media_frame
+        target.pack(fill=tk.BOTH, expand=True)
+        for key, button in self.single_mode_buttons.items():
+            button.configure(style="Primary.TButton" if key == mode else "TButton")
+        self.root.after_idle(
+            self._render_single_image if mode == "image" else self._render_single_media_preview
+        )
+        if mode == "media":
+            self.root.after_idle(self._render_single_timeline)
+
+    def _update_single_settings_summary(self) -> None:
+        if not hasattr(self, "single_platform_summary_var"):
+            return
+        if self.backend_var.get() == "local":
+            if self.local_runtime_var.get() == "lmstudio":
+                model = self.lmstudio_model_var.get().strip() or "未选择模型"
+                platform = f"LM Studio · {model}"
+            elif self.local_runtime_var.get() == "llamacpp":
+                model_path = self.llama_model_path_var.get().strip()
+                platform = f"llama.cpp · {Path(model_path).name if model_path else '未选择 GGUF'}"
+            else:
+                folder = self.local_model_var.get().strip()
+                platform = f"Hugging Face · {Path(folder).name if folder else '未选择目录'}"
+        else:
+            provider = API_PROVIDERS[self._provider_key()]
+            platform = f"{provider.label} · {self._api_model() or '未选择模型'}"
+        preset = self.preset_var.get().strip() or "当前模板"
+        language = "中文" if self.output_language_var.get() == "zh" else "English"
+        style = "词组标签" if self.caption_style_var.get() == "phrases" else "自然语言"
+        thinking = "移除思考标签" if self.remove_thinking_tags_var.get() else "保留思考标签"
+        self.single_platform_summary_var.set(platform)
+        self.single_prompt_summary_var.set(preset)
+        self.single_language_summary_var.set(f"{language} · {style} · {thinking}")
+
+    def _restore_single_controls(self, assume_idle: bool = False) -> None:
+        if not hasattr(self, "single_image_run_button"):
+            return
+        busy = False if assume_idle else self._single_task_running()
+        self.single_image_run_button.configure(
+            state=tk.NORMAL if self.single_image_path is not None and not busy else tk.DISABLED,
+            text="开始单次反推" if not busy else "正在处理…",
+        )
+        media_ready = bool(self.single_media_path and self.single_media_info)
+        state = tk.NORMAL if media_ready and not busy else tk.DISABLED
+        self.single_clip_reverse_button.configure(
+            state=state,
+            text="截取并反推" if not busy else "正在处理…",
+        )
+        self.single_clip_save_button.configure(state=state)
+        self.single_clip_start_scale.configure(state=state)
+        self.single_clip_end_scale.configure(state=state)
+        has_audio = bool(self.single_media_info.get("audio_streams"))
+        has_video = bool(self.single_media_info.get("video_streams"))
+        audio_state = tk.NORMAL if media_ready and has_video and has_audio and not busy else tk.DISABLED
+        self.single_audio_check.configure(state=audio_state)
+
+    def choose_single_image(self) -> None:
+        if self._single_task_running():
+            return
+        selected = filedialog.askopenfilename(
+            title="选择一张图片",
+            initialdir=str(self.single_image_path.parent) if self.single_image_path else (self.folder_var.get() or None),
+            filetypes=[
+                ("图片文件", "*.jpg *.jpeg *.png *.webp *.gif *.heic *.heif"),
+                ("所有文件", "*.*"),
+            ],
+            parent=self.root,
+        )
+        if selected:
+            self._load_single_image(Path(selected))
+
+    def _load_single_image(self, path: Path) -> bool:
+        path = Path(path).resolve()
+        if not path.is_file() or path.suffix.casefold() not in IMAGE_EXTENSIONS:
+            self.single_status_var.set("● 文件不可用，请选择受支持的图片")
+            return False
+        try:
+            source = open_image(path)
+            try:
+                preview = source.copy()
+            finally:
+                source.close()
+        except (OSError, RuntimeError, SyntaxError, ValueError) as error:
+            self.single_status_var.set(f"● 图片读取失败：{error}")
+            return False
+        if self.single_image_preview_source is not None:
+            self.single_image_preview_source.close()
+        self.single_image_preview_source = preview
+        self.single_image_path = path
+        self.single_task_kind = "image"
+        size_mb = path.stat().st_size / 1024 / 1024
+        self.single_image_file_var.set(
+            f"{path.name} · {preview.width}×{preview.height} · {size_mb:.2f} MB"
+        )
+        self.single_status_var.set("● 图片已就绪，可开始单次反推")
+        self.single_metrics_var.set("")
+        self.single_progress_var.set(0)
+        self.single_progress_text_var.set("等待开始")
+        self._render_single_image()
+        self._restore_single_controls()
+        return True
+
+    def _render_single_image(self) -> None:
+        canvas = getattr(self, "single_image_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        width = max(120, canvas.winfo_width())
+        height = max(120, canvas.winfo_height())
+        source = self.single_image_preview_source
+        if source is None:
+            pad = max(26, min(width, height) // 8)
+            canvas.create_rectangle(
+                pad,
+                pad,
+                width - pad,
+                height - pad,
+                outline=COLORS["input_border"],
+                width=2,
+                dash=(7, 6),
+            )
+            canvas.create_text(
+                width / 2,
+                height / 2 - 18,
+                text="拖入图片，或点击选择",
+                fill=COLORS["text"],
+                font=(UI_FONT, 14),
+            )
+            canvas.create_text(
+                width / 2,
+                height / 2 + 18,
+                text="也可以按 Ctrl+V 粘贴剪贴板图片",
+                fill=COLORS["muted"],
+                font=(UI_FONT, UI_TEXT_SIZE),
+            )
+            return
+        preview = source.copy()
+        preview.thumbnail((max(80, width - 34), max(80, height - 54)), Image.Resampling.LANCZOS)
+        self.single_image_preview_photo = ImageTk.PhotoImage(
+            preview, master=self.root
+        )
+        preview.close()
+        canvas.create_image(width / 2, height / 2 - 10, image=self.single_image_preview_photo)
+        canvas.create_text(
+            width / 2,
+            height - 16,
+            text=self.single_image_file_var.get(),
+            fill=COLORS["muted"],
+            font=(UI_FONT, UI_SMALL_SIZE),
+        )
+
+    def start_single_image_reverse(self) -> None:
+        path = self.single_image_path
+        if path is None or self._single_task_running():
+            return
+        self.single_task_kind = "image"
+        self.single_task_path = path
+        self.single_image_result_text.delete("1.0", tk.END)
+        self.single_status_var.set("● 正在准备图片反推…")
+        self.single_metrics_var.set("")
+        self.single_progress_var.set(5)
+        self._restore_single_controls()
+        self.start_task(
+            [path],
+            force=True,
+            context="single",
+            folder_override=path.parent,
+            mode_override="image",
+        )
+
+    def _single_result_widget(self) -> tk.Text:
+        return (
+            self.single_media_result_text
+            if self.single_task_kind == "media"
+            else self.single_image_result_text
+        )
+
+    def save_single_result(self) -> None:
+        widget = self._single_result_widget()
+        result = widget.get("1.0", "end-1c").strip()
+        if not result:
+            self.single_status_var.set("● 暂无可保存的反推结果")
+            return
+        source = self.single_task_path or self.single_image_path or self.single_media_path
+        initialfile = f"{source.stem if source else '单次反推结果'}.txt"
+        destination = filedialog.asksaveasfilename(
+            title="保存单次反推结果",
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt")],
+            initialdir=str(source.parent) if source else None,
+            initialfile=initialfile,
+            parent=self.root,
+        )
+        if not destination:
+            return
+        try:
+            Path(destination).write_text(result + "\n", encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            self.single_status_var.set(f"● 保存失败：{error}")
+            return
+        self.single_status_var.set(f"● 已保存：{Path(destination).name}")
+
+    def copy_single_result(self) -> None:
+        result = self._single_result_widget().get("1.0", "end-1c").strip()
+        if not result:
+            self.single_status_var.set("● 暂无可复制的反推结果")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(result)
+        self.root.update_idletasks()
+        self.single_status_var.set("● 反推结果已复制到剪贴板")
+
+    def _paste_single_clipboard(self, _event=None):
+        if (
+            not hasattr(self, "single_reverse_frame")
+            or self.single_reverse_frame.winfo_manager() != "pack"
+            or self.single_mode_var.get() != "image"
+            or self._single_task_running()
+        ):
+            return None
+        focus = self.root.focus_get()
+        if isinstance(focus, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox, ttk.Spinbox)):
+            return None
+        try:
+            clipboard = ImageGrab.grabclipboard()
+        except (OSError, RuntimeError):
+            clipboard = None
+        if isinstance(clipboard, list):
+            for value in clipboard:
+                candidate = Path(value)
+                if candidate.is_file() and candidate.suffix.casefold() in IMAGE_EXTENSIONS:
+                    self._load_single_image(candidate)
+                    return "break"
+        if not isinstance(clipboard, Image.Image):
+            self.single_status_var.set("● 剪贴板中没有可用图片")
+            return None
+        cache_dir = app_data_dir() / "single-reverse" / "clipboard"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"clipboard-{datetime.now():%Y%m%d-%H%M%S-%f}.png"
+        try:
+            clipboard.convert("RGB").save(path, format="PNG")
+        except (OSError, ValueError) as error:
+            self.single_status_var.set(f"● 粘贴图片失败：{error}")
+            return None
+        self._load_single_image(path)
+        return "break"
+
+    def choose_single_media_file(self) -> None:
+        if self._single_task_running():
+            return
+        selected = filedialog.askopenfilename(
+            title="选择音频或视频",
+            initialdir=str(self.single_media_path.parent) if self.single_media_path else (self.folder_var.get() or None),
+            filetypes=[
+                ("音视频文件", "*.mp4 *.mov *.avi *.mp3 *.wav *.m4a *.aac *.flac *.ogg"),
+                ("所有文件", "*.*"),
+            ],
+            parent=self.root,
+        )
+        if selected:
+            self._load_single_media(Path(selected))
+
+    def _load_single_media(self, path: Path) -> bool:
+        path = Path(path).resolve()
+        if not path.is_file() or path.suffix.casefold() not in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
+            self.single_status_var.set("● 文件不可用，请选择受支持的音频或视频")
+            return False
+        self.single_media_path = path
+        self.single_task_kind = "media"
+        self.single_media_info = {}
+        self.single_media_file_var.set(path.name)
+        self.single_media_meta_var.set("正在读取媒体信息…")
+        self.single_media_probe_var.set("正在读取时长、视频与音频轨道…")
+        self.single_status_var.set("● 正在准备片段编辑器…")
+        self.single_progress_var.set(4)
+        self.single_clip_start_var.set(0.0)
+        self.single_clip_end_var.set(1.0)
+        self._restore_single_controls()
+        self._render_single_media_preview()
+        self._render_single_timeline()
+
+        def probe() -> None:
+            preview_dir = (
+                app_data_dir()
+                / "single-reverse"
+                / "previews"
+                / f"{datetime.now():%Y%m%d-%H%M%S-%f}"
+            )
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with MediaWorkerController([path.parent, preview_dir]) as worker:
+                    info = worker.probe(path)
+                    frames = []
+                    if info.get("video_streams"):
+                        frames = worker.extract_frames(
+                            path,
+                            preview_dir,
+                            frame_count=6,
+                            max_width=720,
+                        )
+                self._post_event(
+                    "single_media_probe_result",
+                    {"path": path, "ok": True, "info": info, "frames": frames},
+                )
+            except (MediaWorkerError, OSError, RuntimeError, ValueError) as error:
+                self._post_event(
+                    "single_media_probe_result",
+                    {"path": path, "ok": False, "error": str(error)},
+                )
+
+        threading.Thread(target=probe, daemon=True, name="single-media-probe").start()
+        return True
+
+    def _apply_single_media_probe(self, payload: dict) -> None:
+        path = Path(payload.get("path") or "")
+        if self.single_media_path is None or path != self.single_media_path:
+            return
+        if not payload.get("ok"):
+            error = str(payload.get("error") or "媒体组件不可用")
+            self.single_media_probe_var.set(f"读取失败：{error}")
+            self.single_media_meta_var.set("无法读取媒体时长与轨道")
+            self.single_status_var.set(f"● 音视频加载失败：{error}")
+            self.single_progress_var.set(0)
+            self._restore_single_controls(assume_idle=True)
+            return
+        info = dict(payload.get("info") or {})
+        duration = max(0.25, float(info.get("duration") or 0.25))
+        self.single_media_info = info
+        self.single_clip_duration = duration
+        self.single_clip_start_scale.configure(to=duration)
+        self.single_clip_end_scale.configure(to=duration)
+        self.single_clip_start_var.set(0.0)
+        self.single_clip_end_var.set(duration)
+        has_video = bool(info.get("video_streams"))
+        has_audio = bool(info.get("audio_streams"))
+        if not has_video and not has_audio:
+            self.single_media_info = {}
+            self.single_status_var.set("● 文件中没有可用的音视频轨道")
+            self._restore_single_controls(assume_idle=True)
+            return
+        for frame in self.single_media_preview_frames:
+            frame.close()
+        self.single_media_preview_frames = []
+        for frame_path in payload.get("frames") or ():
+            try:
+                source = open_image(Path(frame_path))
+                try:
+                    self.single_media_preview_frames.append(source.copy())
+                finally:
+                    source.close()
+            except (OSError, RuntimeError, ValueError):
+                continue
+        if self.single_media_preview_source is not None:
+            self.single_media_preview_source.close()
+            self.single_media_preview_source = None
+        if self.single_media_preview_frames:
+            self.single_media_preview_source = self.single_media_preview_frames[0].copy()
+        size_mb = path.stat().st_size / 1024 / 1024
+        kind = "视频" if has_video else "音频"
+        tracks = "视频轨 + 音频轨" if has_video and has_audio else ("视频轨" if has_video else "音频轨")
+        self.single_media_meta_var.set(
+            f"{kind} · {self._format_media_time(duration)} · {size_mb:.2f} MB · {tracks}"
+        )
+        self.single_media_probe_var.set(
+            f"总时长 {self._format_media_time(duration)} · 拖动滑块选择需要反推的片段"
+        )
+        self.single_include_audio_var.set(has_audio)
+        self._single_clip_changed("end")
+        self.single_status_var.set("● 音视频已就绪，可预览、保存或截取并反推")
+        self.single_progress_var.set(0)
+        self._restore_single_controls(assume_idle=True)
+        self._render_single_media_preview()
+        self._render_single_timeline()
+
+    def _render_single_media_preview(self) -> None:
+        canvases = [
+            getattr(self, "single_media_canvas", None),
+            getattr(self, "single_editor_preview_canvas", None),
+        ]
+        if not hasattr(self, "single_media_preview_photos"):
+            self.single_media_preview_photos = {}
+        for canvas in canvases:
+            if canvas is None or not canvas.winfo_exists():
+                continue
+            canvas.delete("all")
+            width = max(120, canvas.winfo_width())
+            height = max(100, canvas.winfo_height())
+            source = self.single_media_preview_source
+            if source is not None:
+                preview = source.copy()
+                preview.thumbnail((max(80, width - 24), max(70, height - 36)), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(preview, master=self.root)
+                preview.close()
+                self.single_media_preview_photos[canvas] = photo
+                canvas.create_image(width / 2, height / 2 - 5, image=photo)
+            elif self.single_media_path and self.single_media_path.suffix.casefold() in AUDIO_EXTENSIONS:
+                center = height / 2
+                count = max(24, min(80, width // 9))
+                step = width / (count + 2)
+                for index in range(count):
+                    amplitude = (0.25 + 0.7 * abs(math.sin(index * 0.77))) * (height * 0.28)
+                    x = step * (index + 1.5)
+                    canvas.create_line(
+                        x,
+                        center - amplitude,
+                        x,
+                        center + amplitude,
+                        fill=COLORS["accent"],
+                        width=max(2, int(step * 0.45)),
+                    )
+                canvas.create_text(
+                    width / 2,
+                    height - 18,
+                    text="音频波形预览",
+                    fill=COLORS["muted"],
+                    font=(UI_FONT, UI_SMALL_SIZE),
+                )
+            else:
+                canvas.create_text(
+                    width / 2,
+                    height / 2 - 12,
+                    text="拖入音频或视频，或点击选择",
+                    fill=COLORS["text"],
+                    font=(UI_FONT, 13),
+                )
+                canvas.create_text(
+                    width / 2,
+                    height / 2 + 18,
+                    text="支持视频片段与音频片段反推",
+                    fill=COLORS["muted"],
+                    font=(UI_FONT, UI_TEXT_SIZE),
+                )
+
+    def _render_single_timeline(self) -> None:
+        canvas = getattr(self, "single_timeline_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        width = max(160, canvas.winfo_width())
+        height = max(72, canvas.winfo_height())
+        if not self.single_media_path:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="选择音视频后显示时间轴",
+                fill=COLORS["muted"],
+                font=(UI_FONT, UI_TEXT_SIZE),
+            )
+            return
+        image = Image.new("RGBA", (width, height), COLORS["input_readonly"])
+        draw = ImageDraw.Draw(image, "RGBA")
+        frames = self.single_media_preview_frames
+        if frames:
+            segment = max(1, math.ceil(width / len(frames)))
+            for index, frame in enumerate(frames):
+                tile = ImageOps.fit(
+                    frame.convert("RGB"),
+                    (segment, height),
+                    method=Image.Resampling.LANCZOS,
+                ).convert("RGBA")
+                image.alpha_composite(tile, (index * segment, 0))
+                tile.close()
+        else:
+            center = height / 2
+            for x in range(8, width - 8, 7):
+                amplitude = (0.2 + 0.75 * abs(math.sin(x * 0.12))) * height * 0.38
+                draw.rounded_rectangle(
+                    (x, center - amplitude, x + 3, center + amplitude),
+                    radius=1,
+                    fill=COLORS["accent"] + "cc",
+                )
+        duration = max(0.25, float(self.single_clip_duration or 0.25))
+        start = max(0.0, min(duration, float(self.single_clip_start_var.get())))
+        end = max(start, min(duration, float(self.single_clip_end_var.get())))
+        start_x = int(width * start / duration)
+        end_x = int(width * end / duration)
+        draw.rectangle((0, 0, start_x, height), fill=(18, 22, 20, 150))
+        draw.rectangle((end_x, 0, width, height), fill=(18, 22, 20, 150))
+        draw.rectangle(
+            (max(1, start_x), 1, max(start_x + 1, end_x - 1), height - 2),
+            outline=COLORS["semantic_yellow"],
+            width=3,
+        )
+        for x in (start_x, end_x):
+            draw.rounded_rectangle(
+                (max(0, x - 5), 8, min(width - 1, x + 5), height - 8),
+                radius=3,
+                fill=COLORS["semantic_yellow"],
+            )
+        self.single_timeline_photo = ImageTk.PhotoImage(image, master=self.root)
+        image.close()
+        canvas.create_image(0, 0, image=self.single_timeline_photo, anchor=tk.NW)
+
+    def _single_clip_changed(self, changed: str) -> None:
+        if self.single_clip_updating:
+            return
+        self.single_clip_updating = True
+        try:
+            duration = max(0.25, float(self.single_clip_duration or 0.25))
+            start = max(0.0, min(duration, float(self.single_clip_start_var.get())))
+            end = max(0.0, min(duration, float(self.single_clip_end_var.get())))
+            if changed == "start" and start > end - 0.25:
+                end = min(duration, start + 0.25)
+                if end - start < 0.25:
+                    start = max(0.0, end - 0.25)
+            elif changed == "end" and end < start + 0.25:
+                start = max(0.0, end - 0.25)
+                if end - start < 0.25:
+                    end = min(duration, start + 0.25)
+            self.single_clip_start_var.set(start)
+            self.single_clip_end_var.set(end)
+            self.single_clip_start_text_var.set(self._format_media_time(start))
+            self.single_clip_end_text_var.set(self._format_media_time(end))
+            self.single_clip_duration_text_var.set(
+                f"{self._format_media_time(end - start)} / 总长 {self._format_media_time(duration)}"
+            )
+        finally:
+            self.single_clip_updating = False
+        self._render_single_timeline()
+
+    def reset_single_media_selection(self) -> None:
+        if not self.single_media_info or self._single_task_running():
+            return
+        self.single_clip_start_var.set(0.0)
+        self.single_clip_end_var.set(self.single_clip_duration)
+        self._single_clip_changed("end")
+        self.single_status_var.set("● 已恢复为完整音视频范围")
+
+    def preview_single_media_selection(self) -> None:
+        source = self.single_media_path
+        if source is None or not self.single_media_info or self._single_task_running():
+            return
+        output_dir = app_data_dir() / "single-reverse" / "preview-clips"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"preview-{datetime.now():%Y%m%d-%H%M%S-%f}.mp4"
+        self.start_single_clip_task(
+            source,
+            float(self.single_clip_start_var.get()),
+            float(self.single_clip_end_var.get()),
+            include_audio=bool(self.single_include_audio_var.get()),
+            action="preview",
+            output_path=output,
+        )
+
+    def save_single_media_clip(self) -> None:
+        source = self.single_media_path
+        if source is None or not self.single_media_info or self._single_task_running():
+            return
+        destination = filedialog.asksaveasfilename(
+            title="保存所选片段",
+            defaultextension=".mp4",
+            filetypes=[("MP4 视频", "*.mp4")],
+            initialdir=str(source.parent),
+            initialfile=f"{source.stem}_片段.mp4",
+            parent=self.root,
+        )
+        if not destination:
+            return
+        self.start_single_clip_task(
+            source,
+            float(self.single_clip_start_var.get()),
+            float(self.single_clip_end_var.get()),
+            include_audio=bool(self.single_include_audio_var.get()),
+            action="save",
+            output_path=Path(destination),
+        )
+
+    def start_single_media_reverse(self) -> None:
+        source = self.single_media_path
+        if source is None or not self.single_media_info or self._single_task_running():
+            return
+        self.single_task_kind = "media"
+        self.single_media_result_text.delete("1.0", tk.END)
+        self.single_media_tabs.select(0)
+        self.start_single_clip_task(
+            source,
+            float(self.single_clip_start_var.get()),
+            float(self.single_clip_end_var.get()),
+            include_audio=bool(self.single_include_audio_var.get()),
+            action="reverse",
+        )
+
+    def _single_task_running(self) -> bool:
+        if self.runner and self.runner.running:
+            return True
+        with self.media_edit_worker_lock:
+            return self.media_edit_worker is not None
+
+    def _register_single_drop_target(self, widget: tk.Misc) -> None:
+        if DND_FILES is None or not hasattr(widget, "drop_target_register"):
+            return
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._single_media_dropped)
+        except (AttributeError, tk.TclError):
+            return
+
+    def _single_media_dropped(self, event) -> str:
+        try:
+            values = self.root.tk.splitlist(str(getattr(event, "data", "")))
+        except tk.TclError:
+            values = ()
+        paths = [
+            Path(value).resolve()
+            for value in values
+            if Path(value).is_file()
+            and Path(value).suffix.casefold()
+            in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+        ]
+        if not paths:
+            self.single_status_var.set("● 拖放未识别：请拖入受支持的图片、音频或视频")
+            return "break"
+        if len(paths) > 1:
+            self.single_status_var.set(f"● 单次反推一次处理一个文件，已采用：{paths[0].name}")
+        self._accept_single_media(paths[0])
+        return "break"
+
+    def _accept_single_media(self, path: Path) -> None:
+        if self._single_task_running():
+            return
+        if path.suffix.casefold() in IMAGE_EXTENSIONS:
+            self._set_single_mode("image")
+            self._load_single_image(path)
+        elif path.suffix.casefold() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
+            self._set_single_mode("media")
+            self._load_single_media(path)
+
+    @staticmethod
+    def _format_media_time(seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        whole = int(seconds)
+        hours, remainder = divmod(whole, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}.{int((seconds - whole) * 10):01d}"
+
+    def _open_media_file(self, path: Path) -> None:
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))
+            else:
+                webbrowser.open(path.resolve().as_uri())
+        except OSError as error:
+            messagebox.showerror("打开视频失败", str(error), parent=self.root)
+
+    @staticmethod
+    def _new_single_clip_path(source: Path, start: float, end: float) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = source.parent / f"{source.stem}_片段反推_{timestamp}"
+        suffix = 2
+        while candidate.exists():
+            candidate = source.parent / f"{source.stem}_片段反推_{timestamp}-{suffix}"
+            suffix += 1
+        start_ms = max(0, int(round(start * 1000)))
+        end_ms = max(start_ms, int(round(end * 1000)))
+        return candidate / f"{source.stem}_片段_{start_ms}-{end_ms}ms.mp4"
+
+    def start_single_clip_task(
+        self,
+        source: Path,
+        start_seconds: float,
+        end_seconds: float,
+        include_audio: bool = True,
+        action: str = "reverse",
+        output_path: Path | None = None,
+    ) -> None:
+        if self._single_task_running():
+            return
+        if action not in {"preview", "save", "reverse"}:
+            raise ValueError(f"不支持的片段操作：{action}")
+        source = Path(source).resolve()
+        output_path = (
+            Path(output_path).resolve()
+            if output_path is not None
+            else self._new_single_clip_path(source, start_seconds, end_seconds)
+        )
+        self.media_edit_cancelled.clear()
+        self.single_clip_operation = action
+        self.start_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
+        self.retry_button.configure(state=tk.DISABLED)
+        self.selected_button.configure(state=tk.DISABLED)
+        self.batch_button.configure(state=tk.DISABLED)
+        self.single_progress_var.set(8)
+        action_text = {
+            "preview": "正在生成选区预览…",
+            "save": "正在保存所选片段…",
+            "reverse": "正在截取片段，随后开始反推…",
+        }[action]
+        self.single_progress_text_var.set(action_text)
+        self.single_status_var.set(f"● {action_text}")
+        self._restore_single_controls()
+        self.log(
+            f"单次反推片段处理：{source.name} · "
+            f"{self._format_media_time(start_seconds)}–"
+            f"{self._format_media_time(end_seconds)}"
+        )
+
+        def trim() -> None:
+            worker: MediaWorkerController | None = None
+            try:
+                worker = MediaWorkerController([source.parent, output_path.parent])
+                with self.media_edit_worker_lock:
+                    self.media_edit_worker = worker
+                clip_path = worker.trim_video(
+                    source,
+                    output_path,
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    include_audio=include_audio,
+                )
+                if self.media_edit_cancelled.is_set():
+                    self._post_event("single_clip_cancelled", {"action": action})
+                else:
+                    self._post_event(
+                        "single_clip_ready",
+                        {
+                            "action": action,
+                            "source": source,
+                            "clip_path": clip_path,
+                            "start": start_seconds,
+                            "end": end_seconds,
+                            "include_audio": include_audio,
+                        },
+                    )
+            except (MediaWorkerError, OSError, ValueError) as error:
+                if self.media_edit_cancelled.is_set():
+                    self._post_event("single_clip_cancelled", {"action": action})
+                else:
+                    self._post_event(
+                        "single_clip_error",
+                        {"action": action, "source": source, "error": str(error)},
+                    )
+            finally:
+                if worker is not None:
+                    worker.close()
+                with self.media_edit_worker_lock:
+                    if self.media_edit_worker is worker:
+                        self.media_edit_worker = None
+
+        self.controller_thread = threading.Thread(
+            target=trim, daemon=True, name="video-clip-controller"
+        )
+        self.controller_thread.start()
 
     def browse_folder(self) -> None:
         selected = filedialog.askdirectory(title="选择媒体项目目录", initialdir=self.folder_var.get() or None)
@@ -4934,6 +7262,14 @@ class CaptionApp:
                 LMSTUDIO_LOAD_PROFILE_LABELS[LMSTUDIO_LOAD_PROFILE_DEFAULT],
             )
         )
+        llama_server_path_var = tk.StringVar(value=self.llama_server_path_var.get())
+        llama_model_path_var = tk.StringVar(value=self.llama_model_path_var.get())
+        llama_mmproj_path_var = tk.StringVar(value=self.llama_mmproj_path_var.get())
+        llama_model_alias_var = tk.StringVar(value=self.llama_model_alias_var.get())
+        llama_context_length_var = tk.IntVar(
+            value=self.llama_context_length_var.get()
+        )
+        llama_gpu_layers_var = tk.IntVar(value=self.llama_gpu_layers_var.get())
 
         backend_heading = self._semantic_heading(
             frame, "◫", "运行后端与模型", "yellow", "API / LOCAL MODEL"
@@ -5078,6 +7414,188 @@ class CaptionApp:
             padx=(12, 0), pady=(6, 0),
         )
 
+        llama_server_label = ttk.Label(
+            backend_frame, text="llama-server 程序", style="Surface.TLabel"
+        )
+        llama_server_label.grid(row=7, column=0, sticky=tk.W, pady=(15, 0))
+        llama_server_entry = ttk.Entry(
+            backend_frame, textvariable=llama_server_path_var, width=42
+        )
+        llama_server_entry.grid(
+            row=7, column=1, sticky=tk.EW, padx=(12, 8), pady=(15, 0)
+        )
+
+        def browse_llama_server() -> None:
+            selected = filedialog.askopenfilename(
+                title="选择 llama-server.exe",
+                initialdir=(
+                    str(Path(llama_server_path_var.get()).parent)
+                    if llama_server_path_var.get().strip()
+                    else None
+                ),
+                filetypes=[("llama-server", "llama-server.exe"), ("所有文件", "*.*")],
+                parent=dialog,
+            )
+            if selected:
+                llama_server_path_var.set(selected)
+
+        llama_server_button = ttk.Button(
+            backend_frame, text="选择", command=browse_llama_server
+        )
+        llama_server_button.grid(row=7, column=2, sticky=tk.E, pady=(15, 0))
+
+        llama_model_label = ttk.Label(
+            backend_frame, text="GGUF 主模型", style="Surface.TLabel"
+        )
+        llama_model_label.grid(row=8, column=0, sticky=tk.W, pady=(11, 0))
+        llama_model_entry = ttk.Entry(
+            backend_frame, textvariable=llama_model_path_var, width=42
+        )
+        llama_model_entry.grid(
+            row=8, column=1, sticky=tk.EW, padx=(12, 8), pady=(11, 0)
+        )
+
+        def browse_llama_model() -> None:
+            selected = filedialog.askopenfilename(
+                title="选择 GGUF 主模型",
+                initialdir=(
+                    str(Path(llama_model_path_var.get()).parent)
+                    if llama_model_path_var.get().strip()
+                    else None
+                ),
+                filetypes=[("GGUF 模型", "*.gguf"), ("所有文件", "*.*")],
+                parent=dialog,
+            )
+            if selected:
+                llama_model_path_var.set(selected)
+                if not llama_model_alias_var.get().strip():
+                    llama_model_alias_var.set(Path(selected).stem)
+                model_dir = Path(selected).parent
+                if not llama_mmproj_path_var.get().strip():
+                    candidates = sorted(model_dir.glob("mmproj*.gguf"))
+                    if len(candidates) == 1:
+                        llama_mmproj_path_var.set(str(candidates[0]))
+                if not llama_server_path_var.get().strip():
+                    for candidate in (
+                        model_dir / "llama-server.exe",
+                        model_dir.parent / "llama-server.exe",
+                    ):
+                        if candidate.is_file():
+                            llama_server_path_var.set(str(candidate))
+                            break
+
+        llama_model_button = ttk.Button(
+            backend_frame, text="选择", command=browse_llama_model
+        )
+        llama_model_button.grid(row=8, column=2, sticky=tk.E, pady=(11, 0))
+
+        llama_mmproj_label = ttk.Label(
+            backend_frame, text="mmproj 视觉投影", style="Surface.TLabel"
+        )
+        llama_mmproj_label.grid(row=9, column=0, sticky=tk.W, pady=(11, 0))
+        llama_mmproj_entry = ttk.Entry(
+            backend_frame, textvariable=llama_mmproj_path_var, width=42
+        )
+        llama_mmproj_entry.grid(
+            row=9, column=1, sticky=tk.EW, padx=(12, 8), pady=(11, 0)
+        )
+
+        def browse_llama_mmproj() -> None:
+            selected = filedialog.askopenfilename(
+                title="选择 mmproj 视觉投影文件",
+                initialdir=(
+                    str(Path(llama_mmproj_path_var.get()).parent)
+                    if llama_mmproj_path_var.get().strip()
+                    else None
+                ),
+                filetypes=[("GGUF 投影文件", "*.gguf"), ("所有文件", "*.*")],
+                parent=dialog,
+            )
+            if selected:
+                llama_mmproj_path_var.set(selected)
+
+        llama_mmproj_button = ttk.Button(
+            backend_frame, text="选择", command=browse_llama_mmproj
+        )
+        llama_mmproj_button.grid(row=9, column=2, sticky=tk.E, pady=(11, 0))
+
+        llama_alias_label = ttk.Label(
+            backend_frame, text="模型别名", style="Surface.TLabel"
+        )
+        llama_alias_label.grid(row=10, column=0, sticky=tk.W, pady=(11, 0))
+        llama_alias_entry = ttk.Entry(
+            backend_frame, textvariable=llama_model_alias_var, width=42
+        )
+        llama_alias_entry.grid(
+            row=10, column=1, columnspan=2, sticky=tk.EW,
+            padx=(12, 0), pady=(11, 0),
+        )
+
+        llama_runtime_options = ttk.Frame(backend_frame, style="Surface.TFrame")
+        llama_runtime_options.grid(
+            row=11, column=1, columnspan=2, sticky=tk.W,
+            padx=(12, 0), pady=(11, 0),
+        )
+        llama_runtime_label = ttk.Label(
+            backend_frame, text="运行参数", style="Surface.TLabel"
+        )
+        llama_runtime_label.grid(row=11, column=0, sticky=tk.W, pady=(11, 0))
+        ttk.Label(llama_runtime_options, text="上下文", style="SurfaceMuted.TLabel").pack(
+            side=tk.LEFT
+        )
+        llama_context_box = ttk.Spinbox(
+            llama_runtime_options,
+            from_=512,
+            to=131072,
+            increment=512,
+            textvariable=llama_context_length_var,
+            width=9,
+        )
+        llama_context_box.pack(side=tk.LEFT, padx=(6, 18))
+        ttk.Label(llama_runtime_options, text="GPU 层", style="SurfaceMuted.TLabel").pack(
+            side=tk.LEFT
+        )
+        llama_gpu_box = ttk.Spinbox(
+            llama_runtime_options,
+            from_=-1,
+            to=999,
+            increment=1,
+            textvariable=llama_gpu_layers_var,
+            width=7,
+        )
+        llama_gpu_box.pack(side=tk.LEFT, padx=(6, 0))
+        llama_state_var = tk.StringVar(
+            value="原生 GGUF 模式：程序会按任务启动并关闭 llama-server；主模型与 mmproj 必须匹配"
+        )
+        llama_state_label = ttk.Label(
+            backend_frame,
+            textvariable=llama_state_var,
+            style="SurfaceMuted.TLabel",
+            wraplength=560,
+            justify=tk.LEFT,
+        )
+        llama_state_label.grid(
+            row=12, column=1, columnspan=2, sticky=tk.W,
+            padx=(12, 0), pady=(6, 0),
+        )
+        llama_widgets = [
+            llama_server_label, llama_server_entry, llama_server_button,
+            llama_model_label, llama_model_entry, llama_model_button,
+            llama_mmproj_label, llama_mmproj_entry, llama_mmproj_button,
+            llama_runtime_label, llama_runtime_options,
+            llama_alias_label, llama_alias_entry, llama_state_label,
+        ]
+        huggingface_widgets = [
+            local_model_label, local_model_entry, local_model_button,
+        ]
+        lmstudio_widgets = [
+            lmstudio_url_label, lmstudio_url_entry,
+            lmstudio_model_label, lmstudio_model_box, lmstudio_actions,
+            lmstudio_profile_label, lmstudio_profile_box, lmstudio_state_label,
+        ]
+        for widget in (*huggingface_widgets, *lmstudio_widgets, *llama_widgets):
+            widget.grid_remove()
+
         ttk.Separator(frame).grid(
             row=5, column=0, columnspan=3, sticky=tk.EW, pady=(14, 0)
         )
@@ -5164,7 +7682,7 @@ class CaptionApp:
             borderwidth=1,
             relief=tk.FLAT,
             activeborderwidth=0,
-            font=(UI_FONT, 10),
+            font=(UI_FONT, UI_TEXT_SIZE),
         )
         provider_button.configure(menu=provider_menu)
         self._register_themed_menu(provider_menu, "input")
@@ -5256,6 +7774,12 @@ class CaptionApp:
         dialog.qianyi_lmstudio_discover_button = lmstudio_discover_button
         dialog.qianyi_lmstudio_load_button = lmstudio_load_button
         dialog.qianyi_lmstudio_state_var = lmstudio_state_var
+        dialog.qianyi_llama_server_entry = llama_server_entry
+        dialog.qianyi_llama_model_entry = llama_model_entry
+        dialog.qianyi_llama_mmproj_entry = llama_mmproj_entry
+        dialog.qianyi_llama_context_box = llama_context_box
+        dialog.qianyi_llama_gpu_box = llama_gpu_box
+        dialog.qianyi_llama_state_var = llama_state_var
         dialog.qianyi_api_key_entry = entry
         dialog.qianyi_mtp_switch = mtp_switch
         dialog.qianyi_thinking_switch = thinking_switch
@@ -5722,6 +8246,18 @@ class CaptionApp:
             )
             is_huggingface = is_local and local_runtime == "huggingface"
             is_lmstudio = is_local and local_runtime == "lmstudio"
+            is_llamacpp = is_local and local_runtime == "llamacpp"
+            visible_widgets = (
+                huggingface_widgets if is_huggingface
+                else lmstudio_widgets if is_lmstudio
+                else llama_widgets if is_llamacpp
+                else []
+            )
+            for widget in (*huggingface_widgets, *lmstudio_widgets, *llama_widgets):
+                if widget in visible_widgets:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
             provider_key = state["provider_key"]
             provider = API_PROVIDERS[provider_key]
             api_state = tk.DISABLED if is_local else tk.NORMAL
@@ -5750,6 +8286,22 @@ class CaptionApp:
                     else tk.DISABLED
                 )
             )
+            llama_state = tk.NORMAL if is_llamacpp else tk.DISABLED
+            for widget in (
+                llama_server_entry,
+                llama_model_entry,
+                llama_mmproj_entry,
+                llama_alias_entry,
+                llama_context_box,
+                llama_gpu_box,
+            ):
+                widget.configure(state=llama_state)
+            for button in (
+                llama_server_button,
+                llama_model_button,
+                llama_mmproj_button,
+            ):
+                button.configure(state=llama_state)
             provider_button.configure(state=api_state)
             if is_local:
                 if not local_concurrency_note.winfo_manager():
@@ -5872,6 +8424,18 @@ class CaptionApp:
                     LMSTUDIO_LOAD_PROFILE_DEFAULT,
                 )
             )
+            self.llama_server_path_var.set(llama_server_path_var.get().strip())
+            self.llama_model_path_var.set(llama_model_path_var.get().strip())
+            self.llama_mmproj_path_var.set(llama_mmproj_path_var.get().strip())
+            self.llama_model_alias_var.set(llama_model_alias_var.get().strip())
+            try:
+                self.llama_context_length_var.set(int(llama_context_length_var.get()))
+            except (TypeError, ValueError, tk.TclError):
+                self.llama_context_length_var.set(LLAMA_CPP_DEFAULT_CONTEXT_LENGTH)
+            try:
+                self.llama_gpu_layers_var.set(int(llama_gpu_layers_var.get()))
+            except (TypeError, ValueError, tk.TclError):
+                self.llama_gpu_layers_var.set(LLAMA_CPP_DEFAULT_GPU_LAYERS)
             self.enable_mtp_var.set(bool(enable_mtp_var.get()))
             self.remove_thinking_tags_var.set(
                 bool(remove_thinking_tags_var.get())
@@ -5886,6 +8450,12 @@ class CaptionApp:
                 "lmstudio_base_url": self.lmstudio_base_url_var.get(),
                 "lmstudio_model": self.lmstudio_model_var.get(),
                 "lmstudio_load_profile": self.lmstudio_load_profile_var.get(),
+                "llama_server_path": self.llama_server_path_var.get(),
+                "llama_model_path": self.llama_model_path_var.get(),
+                "llama_mmproj_path": self.llama_mmproj_path_var.get(),
+                "llama_model_alias": self.llama_model_alias_var.get(),
+                "llama_context_length": int(self.llama_context_length_var.get()),
+                "llama_gpu_layers": int(self.llama_gpu_layers_var.get()),
                 "enable_mtp": bool(self.enable_mtp_var.get()),
                 "remove_thinking_tags": bool(
                     self.remove_thinking_tags_var.get()
@@ -5902,6 +8472,10 @@ class CaptionApp:
         ttk.Button(
             buttons, text="保存设置", style="Primary.TButton", command=save
         ).pack(side=tk.LEFT, padx=(6, 0))
+        # The dialog creates its own controls after the main workbench has
+        # already chosen a typography bucket. Apply the same readable input
+        # size to these late-created controls before measuring the dialog.
+        self._adaptive_typography(force=True)
         center_dialog(dialog, self.root)
         state["layout_ready"] = True
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
@@ -5939,6 +8513,12 @@ class CaptionApp:
             "lmstudio_base_url": self.lmstudio_base_url_var.get().strip(),
             "lmstudio_model": self.lmstudio_model_var.get().strip(),
             "lmstudio_load_profile": self.lmstudio_load_profile_var.get(),
+            "llama_server_path": self.llama_server_path_var.get().strip(),
+            "llama_model_path": self.llama_model_path_var.get().strip(),
+            "llama_mmproj_path": self.llama_mmproj_path_var.get().strip(),
+            "llama_model_alias": self.llama_model_alias_var.get().strip(),
+            "llama_context_length": int(self.llama_context_length_var.get()),
+            "llama_gpu_layers": int(self.llama_gpu_layers_var.get()),
             "labeling_focus": FOCUS_OPTIONS.get(
                 self.focus_label_var.get(), "subject"
             ),
@@ -5998,8 +8578,17 @@ class CaptionApp:
         self.controller_thread = threading.Thread(target=scan, daemon=True, name="media-scan")
         self.controller_thread.start()
 
-    def _validate_task(self) -> tuple[Path, str, str] | None:
-        folder = Path(self.folder_var.get().strip())
+    def _validate_task(
+        self,
+        folder_override: Path | None = None,
+        mode_override: str | None = None,
+    ) -> tuple[Path, str, str] | None:
+        folder = (
+            Path(folder_override).resolve()
+            if folder_override is not None
+            else Path(self.folder_var.get().strip())
+        )
+        mode = mode_override if mode_override in {"image", "video"} else self.media_mode_var.get()
         system_prompt = self.system_prompt_text.get("1.0", tk.END).strip()
         user_prompt = self.user_prompt_text.get("1.0", tk.END).strip()
         provider_key = self._provider_key()
@@ -6017,7 +8606,7 @@ class CaptionApp:
             prompt = f"{system_prompt}\n\n## 用户要求\n{user_prompt}"
         backend = self.backend_var.get()
         if backend == "local":
-            if self.media_mode_var.get() != "image":
+            if mode != "image":
                 messagebox.showwarning(
                     "本地模型",
                     "本地模型后端当前只支持图片；视频请选择外部 API",
@@ -6038,6 +8627,55 @@ class CaptionApp:
                     messagebox.showwarning(
                         "LM Studio",
                         "请在平台设置中读取并选择模型，或手动填写模型 ID",
+                        parent=self.root,
+                    )
+                    return None
+            elif self.local_runtime_var.get() == "llamacpp":
+                server_path = Path(self.llama_server_path_var.get().strip())
+                model_path = Path(self.llama_model_path_var.get().strip())
+                mmproj_path = Path(self.llama_mmproj_path_var.get().strip())
+                if not server_path.is_file():
+                    messagebox.showwarning(
+                        "llama.cpp",
+                        "请选择有效的 llama-server.exe",
+                        parent=self.root,
+                    )
+                    return None
+                if not model_path.is_file() or model_path.suffix.casefold() != ".gguf":
+                    messagebox.showwarning(
+                        "llama.cpp",
+                        "请选择有效的 GGUF 主模型文件",
+                        parent=self.root,
+                    )
+                    return None
+                if not mmproj_path.is_file() or mmproj_path.suffix.casefold() != ".gguf":
+                    messagebox.showwarning(
+                        "llama.cpp",
+                        "请选择与主模型匹配的 mmproj GGUF 文件",
+                        parent=self.root,
+                    )
+                    return None
+                try:
+                    context_length = int(self.llama_context_length_var.get())
+                    gpu_layers = int(self.llama_gpu_layers_var.get())
+                except (TypeError, ValueError, tk.TclError):
+                    messagebox.showwarning(
+                        "llama.cpp",
+                        "上下文长度和 GPU 层数必须是数字",
+                        parent=self.root,
+                    )
+                    return None
+                if not 512 <= context_length <= 131072:
+                    messagebox.showwarning(
+                        "llama.cpp",
+                        "上下文长度应在 512 到 131072 之间",
+                        parent=self.root,
+                    )
+                    return None
+                if not -1 <= gpu_layers <= 999:
+                    messagebox.showwarning(
+                        "llama.cpp",
+                        "GPU 层数应在 -1 到 999 之间",
                         parent=self.root,
                     )
                     return None
@@ -6068,7 +8706,7 @@ class CaptionApp:
                 "提示", "模型接口地址必须以 http:// 或 https:// 开头", parent=self.root
             )
             return None
-        elif self.media_mode_var.get() == "video" and not provider.supports_video:
+        elif mode == "video" and not provider.supports_video:
             messagebox.showwarning(
                 "视频反推",
                 f"{provider.label} 当前未启用视频输入，请切换火山引擎或兼容视频的平台",
@@ -6084,11 +8722,21 @@ class CaptionApp:
             return None
         return folder, prompt, api_key
 
-    def start_task(self, only_paths: list[Path] | None = None, force: bool = False) -> None:
+    def start_task(
+        self,
+        only_paths: list[Path] | None = None,
+        force: bool = False,
+        context: str = "batch",
+        folder_override: Path | None = None,
+        mode_override: str | None = None,
+    ) -> None:
         if self.runner and self.runner.running:
             return
-        validated = self._validate_task()
+        context = "single" if context == "single" else "batch"
+        validated = self._validate_task(folder_override, mode_override)
         if not validated:
+            if context == "single":
+                self._restore_single_controls(assume_idle=True)
             return
         folder, prompt, api_key = validated
         try:
@@ -6098,7 +8746,7 @@ class CaptionApp:
         except (TypeError, ValueError, tk.TclError):
             concurrency = 3
             self.concurrency_var.set(3)
-        mode = self.media_mode_var.get()
+        mode = mode_override if mode_override in {"image", "video"} else self.media_mode_var.get()
         model_key = self._model_key()
         provider_key = self._provider_key()
         provider = API_PROVIDERS[provider_key]
@@ -6112,6 +8760,14 @@ class CaptionApp:
         local_runtime = self.local_runtime_var.get()
         lmstudio_base_url = self.lmstudio_base_url_var.get().strip()
         lmstudio_model = self.lmstudio_model_var.get().strip()
+        llama_server_path = self.llama_server_path_var.get().strip()
+        llama_model_path = self.llama_model_path_var.get().strip()
+        llama_mmproj_path = self.llama_mmproj_path_var.get().strip()
+        llama_model_alias = self.llama_model_alias_var.get().strip()
+        llama_context_length = int(
+            self.llama_context_length_var.get()
+        )
+        llama_gpu_layers = int(self.llama_gpu_layers_var.get())
         labeling_focus = FOCUS_OPTIONS.get(self.focus_label_var.get(), "subject")
         output_language = self.output_language_var.get()
         trigger_word = self.trigger_word_var.get().strip()
@@ -6119,15 +8775,29 @@ class CaptionApp:
         remove_thinking_tags = bool(self.remove_thinking_tags_var.get())
         skip_existing = bool(self.skip_var.get()) and not force
         self._save_workspace_settings()
-        self.runner = BatchRunner(self._post_event)
+        self.active_task_context = context
+
+        def emit(kind: str, payload: dict) -> None:
+            tagged = dict(payload)
+            tagged["_task_context"] = context
+            self._post_event(kind, tagged)
+
+        self.runner = BatchRunner(emit)
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.retry_button.config(state=tk.DISABLED)
         self.selected_button.config(state=tk.DISABLED)
         self.batch_button.config(state=tk.DISABLED)
-        self.progress_var.set(0)
-        self._set_stage(2)
-        self.progress_text_var.set("准备任务...")
+        if context == "single":
+            for button in self.single_action_buttons:
+                button.configure(state=tk.DISABLED)
+            self.single_progress_var.set(max(8, float(self.single_progress_var.get())))
+            self.single_progress_text_var.set("正在连接模型…")
+            self.single_status_var.set("● 正在连接模型并准备输入…")
+        else:
+            self.progress_var.set(0)
+            self._set_stage(2)
+            self.progress_text_var.set("准备任务...")
         if backend == "local":
             if local_runtime == "lmstudio":
                 profile_label = LMSTUDIO_LOAD_PROFILE_LABELS.get(
@@ -6144,11 +8814,18 @@ class CaptionApp:
                     f"思考{'请求关闭' if remove_thinking_tags else '保留'}"
                 )
             else:
-                self.log(
-                    f"开始任务：本地模型 {Path(local_model_folder).name} / "
-                    f"并发 {concurrency} / "
-                    f"MTP {'请求启用' if enable_mtp else '关闭'}"
-                )
+                if local_runtime == "llamacpp":
+                    self.log(
+                        f"开始任务：llama.cpp / {Path(llama_model_path).name} / "
+                        f"上下文 {llama_context_length} / GPU 层 {llama_gpu_layers} / "
+                        f"并发 {concurrency}"
+                    )
+                else:
+                    self.log(
+                        f"开始任务：本地模型 {Path(local_model_folder).name} / "
+                        f"并发 {concurrency} / "
+                        f"MTP {'请求启用' if enable_mtp else '关闭'}"
+                    )
         else:
             self.log(
                 f"开始任务：{provider.label} / {api_model} / "
@@ -6182,6 +8859,12 @@ class CaptionApp:
                 local_runtime=local_runtime,
                 lmstudio_base_url=lmstudio_base_url,
                 lmstudio_model=lmstudio_model,
+                llama_server_path=llama_server_path,
+                llama_model_path=llama_model_path,
+                llama_mmproj_path=llama_mmproj_path,
+                llama_model_alias=llama_model_alias,
+                llama_context_length=llama_context_length,
+                llama_gpu_layers=llama_gpu_layers,
                 labeling_focus=labeling_focus,
                 output_language=output_language,
                 trigger_word=trigger_word,
@@ -6193,9 +8876,11 @@ class CaptionApp:
                 video_preflight=bool(self.settings.get("video_preflight", True)),
                 enable_mtp=enable_mtp,
                 remove_thinking_tags=remove_thinking_tags,
+                write_output=context != "single",
             )
 
-        self.controller_thread = threading.Thread(target=run, daemon=True, name="batch-controller")
+        thread_name = "single-caption-controller" if context == "single" else "batch-controller"
+        self.controller_thread = threading.Thread(target=run, daemon=True, name=thread_name)
         self.controller_thread.start()
 
     def stop_task(self) -> None:
@@ -6203,8 +8888,16 @@ class CaptionApp:
             self.runner.cancel()
         if self.analysis_token:
             self.analysis_token.cancel()
+        self.media_edit_cancelled.set()
+        with self.media_edit_worker_lock:
+            media_edit_worker = self.media_edit_worker
+        if media_edit_worker is not None:
+            media_edit_worker.close()
         self.stop_button.config(state=tk.DISABLED)
         self.progress_text_var.set("正在停止...")
+        if self.active_task_context == "single":
+            self.single_progress_text_var.set("正在停止单次反推…")
+            self.single_status_var.set("● 正在停止当前任务…")
         self.log("已请求停止，当前请求将被关闭或在超时边界内结束")
 
     def find_similar(self) -> None:
@@ -6412,6 +9105,7 @@ class CaptionApp:
             self.tree.delete(item)
         self.counts = {status: 0 for status in STATUS_TEXT}
         self.counts["total"] = 0
+        self.caption_health_counts = {"missing": 0, "invalid": 0}
         self._sync_selection_widgets()
         self._update_stats()
 
@@ -6421,20 +9115,32 @@ class CaptionApp:
         invalid = {str(path) for path in result.invalid_captions}
         self.orphan_caption_paths = list(result.orphan_captions)
         for path in result.files:
+            key = str(path)
+            caption_exists = key not in missing
+            caption_usable = caption_exists and key not in invalid
             if path in result.conflicts:
-                self._set_item(path, "failed", result.conflicts[path])
-            elif has_usable_caption(path):
+                detail = result.conflicts[path]
+                status = "failed"
+            elif caption_usable:
                 caption = caption_path_for(path).read_text(encoding="utf-8").strip()
-                self._set_item(path, "skipped", caption)
+                detail = caption
+                status = "skipped"
             else:
                 detail = (
                     "缺少对应 TXT"
-                    if str(path) in missing
+                    if key in missing
                     else "TXT 为空或包含错误信息"
-                    if str(path) in invalid
+                    if key in invalid
                     else ""
                 )
-                self._set_item(path, "pending", detail)
+                status = "pending"
+            self._set_item(
+                path,
+                status,
+                detail,
+                caption_exists=caption_exists,
+                caption_usable=caption_usable,
+            )
         for path, detail in result.unreadable.items():
             self._set_item(path, "failed", detail)
         for path in result.orphan_captions:
@@ -6459,6 +9165,8 @@ class CaptionApp:
         status: str,
         detail: str,
         elapsed_seconds: float | None = None,
+        caption_exists: bool | None = None,
+        caption_usable: bool | None = None,
     ) -> None:
         key = str(path)
         old = self.items.get(key)
@@ -6466,16 +9174,31 @@ class CaptionApp:
         if old:
             old_status = old["status"]
             self.counts[old_status] = max(0, self.counts[old_status] - 1)
+            self._adjust_caption_health(old, -1)
         else:
             self.counts["total"] += 1
-        caption_path = caption_path_for(path)
+        if caption_exists is None:
+            if status == "success":
+                caption_exists = True
+            elif old is not None and status in {"running", "failed", "cancelled"}:
+                caption_exists = bool(old.get("caption_exists", False))
+            else:
+                caption_exists = caption_path_for(path).is_file()
+        if caption_usable is None:
+            if status == "success":
+                caption_usable = True
+            elif old is not None and status in {"running", "failed", "cancelled"}:
+                caption_usable = bool(old.get("caption_usable", False))
+            else:
+                caption_usable = has_usable_caption(path)
         self.items[key] = {
             "path": path,
             "status": status,
             "detail": detail,
-            "caption_exists": caption_path.is_file(),
-            "caption_usable": has_usable_caption(path),
+            "caption_exists": caption_exists,
+            "caption_usable": caption_usable,
         }
+        self._adjust_caption_health(self.items[key], 1)
         self.counts[status] += 1
         self._refresh_selected_result(
             path, status, detail, elapsed_seconds=elapsed_seconds
@@ -6490,6 +9213,18 @@ class CaptionApp:
             self.tree.item(row, values=(STATUS_TEXT[status], relative, detail.replace("\n", " ")[:220]), tags=(status,))
         self.gallery.update_item(self.items[key])
         self._update_stats()
+
+    def _adjust_caption_health(self, item: dict, delta: int) -> None:
+        if item.get("is_orphan", False):
+            return
+        if not item.get("caption_exists", False):
+            self.caption_health_counts["missing"] = max(
+                0, self.caption_health_counts["missing"] + delta
+            )
+        elif not item.get("caption_usable", False):
+            self.caption_health_counts["invalid"] = max(
+                0, self.caption_health_counts["invalid"] + delta
+            )
 
     def _refresh_selected_result(
         self,
@@ -6668,13 +9403,8 @@ class CaptionApp:
 
     def _update_stats(self) -> None:
         failed = self.counts["failed"]
-        missing = sum(
-            not item.get("caption_exists", False) for item in self.items.values()
-        )
-        invalid = sum(
-            item.get("caption_exists", False) and not item.get("caption_usable", False)
-            for item in self.items.values()
-        )
+        missing = self.caption_health_counts["missing"]
+        invalid = self.caption_health_counts["invalid"]
         self.stats_var.set(
             f"总 {self.counts['total']} · 缺 {missing} · 无效 {invalid} · "
             f"孤 {len(self.orphan_caption_paths)} · 成 {self.counts['success']} · 失 {failed}"
@@ -6698,6 +9428,8 @@ class CaptionApp:
                 break
             processed += 1
             if kind == "scan":
+                if payload.get("_task_context") == "single":
+                    continue
                 if payload.get("scan_generation") != self.scan_generation:
                     continue
                 self._handle_scan(payload["result"])
@@ -6711,16 +9443,70 @@ class CaptionApp:
                 path = payload["path"]
                 key = str(path)
                 self.thumbnail_pending.discard(key)
-                image = ImageTk.PhotoImage(payload["image"])
+                image = ImageTk.PhotoImage(payload["image"], master=self.root)
                 self.thumbnail_cache[key] = image
                 self.gallery.update_thumbnail(path, image)
             elif kind == "hardware":
-                self.hardware_var.set(payload["text"])
+                sample = payload.get("sample")
+                if isinstance(sample, dict):
+                    self._apply_hardware_sample(sample)
             elif kind == "engine":
                 detail = str(payload.get("detail") or "媒体引擎状态已更新")
                 self.log(detail)
+                if payload.get("_task_context") == "single":
+                    self.single_status_var.set(f"● {detail}")
                 if hasattr(self, "system_maintenance_state_var"):
                     self.system_maintenance_state_var.set(detail)
+            elif kind == "single_media_probe_result":
+                self._apply_single_media_probe(payload)
+            elif kind == "single_clip_ready":
+                clip_path = Path(payload["clip_path"])
+                action = str(payload.get("action") or "reverse")
+                self._restore_idle_controls()
+                if action == "preview":
+                    self.single_progress_var.set(100)
+                    self.single_progress_text_var.set("选区预览已生成")
+                    self.single_status_var.set("● 正在使用系统播放器打开选区预览")
+                    self.root.after(80, lambda: self._open_media_file(clip_path))
+                    self._restore_single_controls(assume_idle=True)
+                elif action == "save":
+                    self.single_progress_var.set(100)
+                    self.single_progress_text_var.set("片段已保存")
+                    self.single_status_var.set(f"● 已保存片段：{clip_path.name}")
+                    self._restore_single_controls(assume_idle=True)
+                else:
+                    self.single_task_kind = "media"
+                    self.single_task_path = clip_path
+                    self.single_progress_var.set(22)
+                    self.single_progress_text_var.set("片段已生成，正在启动反推…")
+                    self.single_status_var.set("● 片段已生成，正在连接模型…")
+                    self.single_media_tabs.select(1)
+                    self.log(
+                        f"单次片段已生成：{clip_path.name} · "
+                        f"{self._format_media_time(float(payload.get('start') or 0))}–"
+                        f"{self._format_media_time(float(payload.get('end') or 0))}"
+                    )
+                    self.start_task(
+                        [clip_path],
+                        force=True,
+                        context="single",
+                        folder_override=clip_path.parent,
+                        mode_override="video",
+                    )
+            elif kind == "single_clip_cancelled":
+                self._restore_idle_controls()
+                self.single_progress_var.set(0)
+                self.single_progress_text_var.set("片段处理已取消")
+                self.single_status_var.set("● 已取消片段处理")
+                self._restore_single_controls(assume_idle=True)
+            elif kind == "single_clip_error":
+                self._restore_idle_controls()
+                error = str(payload.get("error") or "未知错误")
+                self.single_progress_var.set(0)
+                self.single_progress_text_var.set("片段处理失败")
+                self.single_status_var.set(f"● 片段处理失败：{error}")
+                self.log(f"单次片段处理失败：{error}")
+                self._restore_single_controls(assume_idle=True)
             elif kind == "maintenance_done":
                 automatic = bool(payload.get("automatic"))
                 output = Path(payload["path"])
@@ -6853,30 +9639,52 @@ class CaptionApp:
                     variable.set(f"●  连接失败 · {summary}")
                     label.configure(style="StatusError.TLabel")
             elif kind == "status":
+                if payload.get("_task_context") == "single":
+                    self._handle_single_status(payload)
+                    continue
                 path = payload["path"]
                 status = payload["status"]
                 detail = payload.get("detail", "")
                 elapsed = payload.get("elapsed_seconds")
+                character_count = payload.get("character_count")
+                speed = payload.get("characters_per_second")
+                if status == "success" and character_count is None:
+                    character_count = count_output_characters(detail)
+                if (
+                    status == "success"
+                    and speed is None
+                    and elapsed is not None
+                ):
+                    speed = float(character_count or 0) / max(
+                        0.001, float(elapsed)
+                    )
                 self._set_item(
                     path,
                     status,
                     detail,
                     elapsed_seconds=elapsed,
                 )
-                elapsed_text = (
-                    f" · {float(elapsed):.1f} 秒"
-                    if elapsed is not None and status != "running"
-                    else ""
+                metrics_text = self._format_generation_metrics(
+                    status,
+                    elapsed_seconds=elapsed,
+                    character_count=character_count,
+                    characters_per_second=speed,
                 )
                 self.log(
                     f"{STATUS_TEXT[status]}：{self._relative_path(path)}"
-                    f"{elapsed_text}"
+                    f"{metrics_text}"
                     f"{(' | ' + detail[:300]) if detail else ''}"
                 )
             elif kind == "progress":
                 completed = payload["completed"]
                 total = payload["total"]
                 eta = payload["eta"]
+                if payload.get("_task_context") == "single":
+                    self.single_progress_var.set(completed / total * 100 if total else 100)
+                    self.single_progress_text_var.set(
+                        f"{completed}/{total} · ETA {self._format_eta(eta)}"
+                    )
+                    continue
                 self.progress_var.set(completed / total * 100 if total else 100)
                 self.progress_text_var.set(f"{completed}/{total}  ·  ETA {self._format_eta(eta)}")
             elif kind == "analysis_progress":
@@ -6909,8 +9717,14 @@ class CaptionApp:
                 self._restore_idle_controls()
                 self.log(f"相似图检测失败：{payload['error']}")
             elif kind == "done":
-                self._handle_done(payload["status"], payload["summary"], payload["journal_dir"])
-        self.events_after_id = self.root.after(60, self._process_events)
+                if payload.get("_task_context") == "single":
+                    self._handle_single_done(
+                        payload["status"], payload["summary"], payload["journal_dir"]
+                    )
+                else:
+                    self._handle_done(payload["status"], payload["summary"], payload["journal_dir"])
+        next_poll_ms = 25 if processed >= 120 else 60 if processed else 160
+        self.events_after_id = self.root.after(next_poll_ms, self._process_events)
 
     @staticmethod
     def _format_eta(seconds: float) -> str:
@@ -6918,6 +9732,24 @@ class CaptionApp:
         if seconds < 60:
             return f"{seconds} 秒"
         return f"{seconds // 60} 分 {seconds % 60} 秒"
+
+    @staticmethod
+    def _format_generation_metrics(
+        status: str,
+        elapsed_seconds: float | None = None,
+        character_count: int | None = None,
+        characters_per_second: float | None = None,
+    ) -> str:
+        if status == "running":
+            return ""
+        parts = []
+        if elapsed_seconds is not None:
+            parts.append(f"耗时 {float(elapsed_seconds):.1f} 秒")
+        if status == "success" and character_count is not None:
+            parts.append(f"字数 {int(character_count)}")
+        if status == "success" and characters_per_second is not None:
+            parts.append(f"速度 {float(characters_per_second):.1f} 字/秒")
+        return f" · {' · '.join(parts)}" if parts else ""
 
     def _restore_idle_controls(self) -> None:
         self.analysis_token = None
@@ -6931,6 +9763,78 @@ class CaptionApp:
             state=tk.NORMAL if has_selected_media else tk.DISABLED
         )
         self.batch_button.config(state=tk.NORMAL)
+        self._restore_single_controls()
+
+    def _handle_single_status(self, payload: dict) -> None:
+        path = Path(payload["path"])
+        status = str(payload.get("status") or "failed")
+        detail = str(payload.get("detail") or "")
+        elapsed = payload.get("elapsed_seconds")
+        character_count = payload.get("character_count")
+        speed = payload.get("characters_per_second")
+        if status == "success" and character_count is None:
+            character_count = count_output_characters(detail)
+        if status == "success" and speed is None and elapsed is not None:
+            speed = float(character_count or 0) / max(0.001, float(elapsed))
+        metrics = self._format_generation_metrics(
+            status,
+            elapsed_seconds=elapsed,
+            character_count=character_count,
+            characters_per_second=speed,
+        ).lstrip(" ·")
+        if status == "running":
+            self.single_status_var.set(f"● {detail or '正在请求模型'}")
+            self.single_progress_text_var.set(detail or "正在请求模型…")
+            self.single_progress_var.set(max(28, float(self.single_progress_var.get())))
+        elif status == "success":
+            widget = self._single_result_widget()
+            widget.delete("1.0", tk.END)
+            widget.insert("1.0", detail)
+            self.single_status_var.set("● 反推完成，结果可继续编辑")
+            self.single_metrics_var.set(metrics)
+            self.single_progress_var.set(100)
+            self.single_progress_text_var.set("反推完成")
+            if self.single_task_kind == "media":
+                self.single_media_tabs.select(1)
+        elif status == "cancelled":
+            self.single_status_var.set("● 单次反推已取消")
+            self.single_metrics_var.set(metrics)
+        else:
+            widget = self._single_result_widget()
+            widget.delete("1.0", tk.END)
+            widget.insert("1.0", detail)
+            self.single_status_var.set("● 反推失败，错误详情已显示在结果区")
+            self.single_metrics_var.set(metrics)
+            if self.single_task_kind == "media":
+                self.single_media_tabs.select(1)
+        log_metrics = f" · {metrics}" if metrics else ""
+        self.log(
+            f"单次反推 {STATUS_TEXT.get(status, status)}：{path.name}"
+            f"{log_metrics}{(' | ' + detail[:300]) if detail else ''}"
+        )
+
+    def _handle_single_done(
+        self,
+        status: str,
+        summary: BatchSummary,
+        journal_dir: Path,
+    ) -> None:
+        self._restore_idle_controls()
+        self.active_task_context = "batch"
+        if status == "stopped":
+            self.single_progress_text_var.set("单次反推已停止")
+            self.single_status_var.set("● 单次反推已停止")
+        elif summary.success:
+            self.single_progress_var.set(100)
+            self.single_progress_text_var.set("反推完成")
+        elif summary.failed:
+            self.single_progress_var.set(0)
+            self.single_progress_text_var.set("反推失败")
+        self.log(
+            f"单次反推结束：成功 {summary.success}，失败 {summary.failed}，"
+            f"耗时 {summary.elapsed_seconds:.1f} 秒；日志 {journal_dir}"
+        )
+        self._restore_single_controls(assume_idle=True)
 
     def _handle_done(self, status: str, summary: BatchSummary, journal_dir: Path) -> None:
         self.last_failed_paths = [path for path, _detail in summary.failures]
@@ -6941,9 +9845,15 @@ class CaptionApp:
             self.progress_var.set(100)
             self.progress_text_var.set("任务完成")
             self._set_stage(3)
+        average_speed = summary.characters / max(
+            0.001, summary.elapsed_seconds
+        )
         self.log(
             f"任务结束：成功 {summary.success}，跳过 {summary.skipped}，"
-            f"失败 {summary.failed}，取消 {summary.cancelled}；日志 {journal_dir}"
+            f"失败 {summary.failed}，取消 {summary.cancelled}；"
+            f"总耗时 {summary.elapsed_seconds:.1f} 秒，"
+            f"总字数 {summary.characters}，"
+            f"平均速度 {average_speed:.1f} 字/秒；日志 {journal_dir}"
         )
         self.refresh_project_center()
 
@@ -7011,7 +9921,9 @@ class CaptionApp:
             preview.thumbnail(
                 (max_width, max_height), Image.Resampling.LANCZOS
             )
-            self.preview_image = ImageTk.PhotoImage(preview.copy())
+            self.preview_image = ImageTk.PhotoImage(
+                preview.copy(), master=self.root
+            )
             preview.close()
             self._preview_render_key = render_key
             self.preview_label.config(image=self.preview_image, text="")
@@ -7209,9 +10121,12 @@ class CaptionApp:
         self.log_text.see(tk.END)
 
     def close(self) -> None:
+        with self.media_edit_worker_lock:
+            media_edit_worker = self.media_edit_worker
         active = bool(
             (self.runner and self.runner.running)
             or (self.analysis_token and self.controller_thread and self.controller_thread.is_alive())
+            or media_edit_worker is not None
         )
         if active and not self.update_install_pending:
             if not messagebox.askyesno("确认退出", "任务正在运行，确定停止并退出？", parent=self.root):
@@ -7220,6 +10135,12 @@ class CaptionApp:
                 self.runner.cancel()
             if self.analysis_token:
                 self.analysis_token.cancel()
+            self.media_edit_cancelled.set()
+            if media_edit_worker is not None:
+                media_edit_worker.close()
+        elif media_edit_worker is not None:
+            self.media_edit_cancelled.set()
+            media_edit_worker.close()
         self.hardware_monitor.stop()
         try:
             self._save_workspace_settings()
@@ -7251,6 +10172,15 @@ class CaptionApp:
         if self._preview_source_image is not None:
             self._preview_source_image.close()
             self._preview_source_image = None
+        if self.single_image_preview_source is not None:
+            self.single_image_preview_source.close()
+            self.single_image_preview_source = None
+        if self.single_media_preview_source is not None:
+            self.single_media_preview_source.close()
+            self.single_media_preview_source = None
+        for frame in self.single_media_preview_frames:
+            frame.close()
+        self.single_media_preview_frames.clear()
         self.root.destroy()
 
 
@@ -7258,7 +10188,7 @@ def main() -> None:
     if "--qianyi-worker" in sys.argv:
         raise SystemExit(run_worker_cli(sys.argv[1:]))
     enable_dpi_awareness()
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
     smoke_test = "--smoke-test" in sys.argv
     if smoke_test:
         root.withdraw()
@@ -7267,7 +10197,7 @@ def main() -> None:
         if app._compose_launch_background(640, 360).size != (640, 360):
             raise RuntimeError("启动背景无法渲染")
         expected_icons = {
-            "project", "image", "video", "platform", "system", "night", "day"
+            "project", "image", "video", "single", "platform", "system", "night", "day"
         }
         for theme_key in THEMES:
             if set(app.toolbar_icons.get(theme_key, {})) != expected_icons:
@@ -7283,9 +10213,19 @@ def main() -> None:
                 app.user_prompt_text,
                 app.system_prompt_text,
                 app.log_text,
+                app.single_image_result_text,
+                app.single_media_result_text,
             ):
                 if text_widget.cget("background") != THEMES[theme_key]["input_bg"]:
                     raise RuntimeError(f"{theme_key} 文本区主题同步失败")
+            for canvas, color_key in (
+                (app.single_image_canvas, "media_bg"),
+                (app.single_media_canvas, "media_bg"),
+                (app.single_editor_preview_canvas, "media_bg"),
+                (app.single_timeline_canvas, "input_readonly"),
+            ):
+                if canvas.cget("background") != THEMES[theme_key][color_key]:
+                    raise RuntimeError(f"{theme_key} 单次反推画布主题同步失败")
             if (
                 app.system_release_notes.cget("background")
                 != THEMES[theme_key]["input_readonly"]

@@ -18,6 +18,7 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,7 @@ from media_caption_worker import (
 
 
 APP_NAME = "Media Caption Tool"
-APP_VERSION = "3.6.4"
+APP_VERSION = "3.6.6"
 GITHUB_REPOSITORY = "wozhendemeiyou/qianyi-media-caption-tool"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 GITHUB_LATEST_RELEASE_API = (
@@ -59,6 +60,7 @@ PROVIDER_TEST_URLS = {
 }
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 ALL_MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 IGNORED_DIRECTORY_NAMES = {
     "$recycle.bin",
@@ -99,6 +101,12 @@ LMSTUDIO_LOAD_CONTEXT_LENGTH = 8192
 LMSTUDIO_LOAD_PARALLEL = 1
 LMSTUDIO_LOAD_PROFILE_DEFAULT = "low_vram"
 LMSTUDIO_LOAD_PROFILES = frozenset({"low_vram", "cpu", "inherit"})
+LLAMA_CPP_READ_TIMEOUT = 600
+LLAMA_CPP_START_TIMEOUT = 180
+LLAMA_CPP_DEFAULT_CONTEXT_LENGTH = 4096
+LLAMA_CPP_DEFAULT_GPU_LAYERS = 99
+LLAMA_CPP_IMAGE_MAX_DIMENSION = 1280
+LLAMA_CPP_IMAGE_SIZE_LIMIT = 512 * 1024
 HEIF_DECODE_LOCK = threading.Lock()
 SEED_2_0_PLAN_END_DATE = date(2026, 8, 8)
 
@@ -648,7 +656,7 @@ class DpapiSecretStore(SecretStore):
 
 
 DEFAULT_SETTINGS = {
-    "version": 13,
+    "version": 14,
     "model_key": DEFAULT_MODEL_KEY,
     "provider_key": DEFAULT_PROVIDER_KEY,
     "api_models": {},
@@ -669,6 +677,12 @@ DEFAULT_SETTINGS = {
     "lmstudio_base_url": "http://localhost:1234/v1",
     "lmstudio_model": "",
     "lmstudio_load_profile": LMSTUDIO_LOAD_PROFILE_DEFAULT,
+    "llama_server_path": "",
+    "llama_model_path": "",
+    "llama_mmproj_path": "",
+    "llama_model_alias": "",
+    "llama_context_length": LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+    "llama_gpu_layers": LLAMA_CPP_DEFAULT_GPU_LAYERS,
     "labeling_focus": "subject",
     "output_language": "zh",
     "trigger_word": "",
@@ -1308,17 +1322,30 @@ $log = '{quoted(log_path)}'
 $expectedHash = '{expected_hash}'
 $succeeded = $false
 $exitCode = 0
+function Get-Sha256([string] $path) {{
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {{
+        $stream = [System.IO.File]::OpenRead($path)
+        try {{
+            return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
+        }} finally {{
+            $stream.Dispose()
+        }}
+    }} finally {{
+        $sha.Dispose()
+    }}
+}}
 try {{
     "[$(Get-Date -Format o)] Waiting for application processes {wait_label}" | Set-Content -LiteralPath $log -Encoding UTF8
 {wait_commands}
     Start-Sleep -Milliseconds 750
     Copy-Item -LiteralPath $source -Destination $staged -Force
-    $stagedHash = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash
+    $stagedHash = Get-Sha256 $staged
     if ($stagedHash -ne $expectedHash) {{
         throw "Staged executable SHA-256 mismatch"
     }}
     Move-Item -LiteralPath $staged -Destination $target -Force
-    $installedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+    $installedHash = Get-Sha256 $target
     if ($installedHash -ne $expectedHash) {{
         throw "Installed executable SHA-256 mismatch"
     }}
@@ -1460,7 +1487,7 @@ class SettingsStore:
         settings["backend"] = settings.get("backend") if settings.get("backend") in {"api", "local"} else "api"
         settings["local_runtime"] = (
             settings.get("local_runtime")
-            if settings.get("local_runtime") in {"huggingface", "lmstudio"}
+            if settings.get("local_runtime") in {"huggingface", "lmstudio", "llamacpp"}
             else "huggingface"
         )
         lmstudio_base_url = settings.get("lmstudio_base_url")
@@ -1475,6 +1502,24 @@ class SettingsStore:
         )
         settings["lmstudio_load_profile"] = normalize_lmstudio_load_profile(
             settings.get("lmstudio_load_profile")
+        )
+        for key in (
+            "llama_server_path", "llama_model_path", "llama_mmproj_path",
+            "llama_model_alias",
+        ):
+            value = settings.get(key)
+            settings[key] = value.strip() if isinstance(value, str) else ""
+        settings["llama_context_length"] = bounded_int(
+            settings.get("llama_context_length"),
+            LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+            512,
+            131072,
+        )
+        settings["llama_gpu_layers"] = bounded_int(
+            settings.get("llama_gpu_layers"),
+            LLAMA_CPP_DEFAULT_GPU_LAYERS,
+            -1,
+            999,
         )
         settings["labeling_focus"] = (
             settings.get("labeling_focus")
@@ -1557,7 +1602,7 @@ class SettingsStore:
         )
         cleaned["local_runtime"] = (
             cleaned.get("local_runtime")
-            if cleaned.get("local_runtime") in {"huggingface", "lmstudio"}
+            if cleaned.get("local_runtime") in {"huggingface", "lmstudio", "llamacpp"}
             else "huggingface"
         )
         lmstudio_base_url = cleaned.get("lmstudio_base_url")
@@ -1572,6 +1617,24 @@ class SettingsStore:
         )
         cleaned["lmstudio_load_profile"] = normalize_lmstudio_load_profile(
             cleaned.get("lmstudio_load_profile")
+        )
+        for key in (
+            "llama_server_path", "llama_model_path", "llama_mmproj_path",
+            "llama_model_alias",
+        ):
+            value = cleaned.get(key)
+            cleaned[key] = value.strip() if isinstance(value, str) else ""
+        cleaned["llama_context_length"] = bounded_int(
+            cleaned.get("llama_context_length"),
+            LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+            512,
+            131072,
+        )
+        cleaned["llama_gpu_layers"] = bounded_int(
+            cleaned.get("llama_gpu_layers"),
+            LLAMA_CPP_DEFAULT_GPU_LAYERS,
+            -1,
+            999,
         )
         provider_key = str(cleaned.get("provider_key", DEFAULT_PROVIDER_KEY))
         cleaned["provider_key"] = (
@@ -1683,6 +1746,11 @@ def write_caption(media_path: Path, caption: str) -> None:
     if not cleaned:
         raise ValueError("模型返回了空结果")
     atomic_write_text(caption_path_for(media_path), cleaned)
+
+
+def count_output_characters(text: str) -> int:
+    """Count visible output characters without inflating metrics with whitespace."""
+    return sum(1 for character in text if not character.isspace())
 
 
 def prepend_trigger_word(
@@ -2259,17 +2327,27 @@ class CaptionClient:
 
     def _billable_post(self, url: str, payload: dict[str, Any], timeout=(10, 180)) -> dict[str, Any]:
         # A timed-out generation may already have been billed. Do not retry it automatically.
-        response = self.transport.request(
-            "POST",
-            url,
-            token=self.token,
-            api_key=self.api_key,
-            attempts=1,
-            timeout=timeout,
-            headers=self.headers,
-            json=payload,
-        )
-        return _response_json(response, self.api_key)
+        def send_once() -> dict[str, Any]:
+            response = self.transport.request(
+                "POST",
+                url,
+                token=self.token,
+                api_key=self.api_key,
+                attempts=1,
+                timeout=timeout,
+                headers=self.headers,
+                json=payload,
+            )
+            return _response_json(response, self.api_key)
+
+        request_lock = getattr(self, "_request_lock", None)
+        if request_lock is None:
+            return send_once()
+        # A single local server/model may expose only one context slot.  Keep
+        # preprocessing concurrent, but serialize billable generations so a
+        # user-selected worker count cannot corrupt a local KV cache.
+        with request_lock:
+            return send_once()
 
     def _chat_url(self) -> str:
         if self.api_endpoint:
@@ -2460,6 +2538,7 @@ class LmStudioCaptionClient(CaptionClient):
             raise ValueError("LM Studio Base URL 必须以 http:// 或 https:// 开头")
         if not selected_model:
             raise ValueError("请选择或填写 LM Studio 模型 ID")
+        self._request_lock = threading.RLock()
         super().__init__(
             MODELS[DEFAULT_MODEL_KEY],
             "",
@@ -2625,6 +2704,303 @@ class LmStudioCaptionClient(CaptionClient):
                 "若仍异常，再检查模型、Tokenizer、量化文件及配套 mmproj 的兼容性。"
             )
         return text
+
+
+def _find_free_local_port() -> int:
+    """Reserve a short-lived localhost port for an owned llama.cpp server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+class LlamaCppCaptionClient(CaptionClient):
+    """Run a local GGUF vision model through an owned llama.cpp server."""
+
+    def __init__(
+        self,
+        server_path: str | Path,
+        model_path: str | Path,
+        mmproj_path: str | Path,
+        token: CancellationToken,
+        transport: HttpTransport | None = None,
+        *,
+        model_alias: str = "",
+        context_length: int = LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+        gpu_layers: int = LLAMA_CPP_DEFAULT_GPU_LAYERS,
+        sampling: dict[str, Any] | None = None,
+        remove_thinking_tags: bool = True,
+    ):
+        self.server_path = Path(server_path).expanduser()
+        self.model_path = Path(model_path).expanduser()
+        self.mmproj_path = Path(mmproj_path).expanduser()
+        self.model_alias = str(model_alias or self.model_path.stem).strip()
+        self.context_length = bounded_int(
+            context_length,
+            LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+            512,
+            131072,
+        )
+        self.gpu_layers = bounded_int(
+            gpu_layers,
+            LLAMA_CPP_DEFAULT_GPU_LAYERS,
+            -1,
+            999,
+        )
+        self._server_process: subprocess.Popen | None = None
+        self._server_log_handle = None
+        self._server_log_path: Path | None = None
+        self._server_base_url = ""
+        self._request_lock = threading.RLock()
+        super().__init__(
+            MODELS[DEFAULT_MODEL_KEY],
+            "",
+            token,
+            transport,
+            provider_key="custom",
+            api_model=self.model_alias,
+            api_endpoint="",
+            sampling=sampling,
+            remove_thinking_tags=remove_thinking_tags,
+        )
+        try:
+            self._validate_files()
+            self._start_server()
+            self.api_endpoint = self._server_base_url
+        except Exception:
+            self.close()
+            raise
+
+    def _validate_files(self) -> None:
+        if not self.server_path.is_file():
+            raise ValueError(
+                "未找到 llama-server 可执行文件，请在平台设置中选择 llama-server.exe"
+            )
+        if not self.model_path.is_file():
+            raise ValueError("GGUF 主模型文件不存在，请重新选择")
+        if self.model_path.suffix.casefold() != ".gguf":
+            raise ValueError("GGUF 主模型必须是 .gguf 文件")
+        if not self.mmproj_path.is_file():
+            raise ValueError("mmproj 视觉投影文件不存在，请重新选择")
+        if self.mmproj_path.suffix.casefold() != ".gguf":
+            raise ValueError("mmproj 文件必须是 .gguf 文件")
+
+    def _server_command(self, port: int) -> list[str]:
+        command = [
+            str(self.server_path),
+            "-m", str(self.model_path),
+            "--mmproj", str(self.mmproj_path),
+            "--host", "127.0.0.1",
+            "--port", str(port),
+            "-c", str(self.context_length),
+        ]
+        if self.model_alias:
+            command.extend(("--alias", self.model_alias))
+        if self.gpu_layers >= 0:
+            command.extend(("-ngl", str(self.gpu_layers)))
+        return command
+
+    def _read_server_log_tail(self) -> str:
+        path = self._server_log_path
+        if path is None or not path.is_file():
+            return ""
+        try:
+            handle = self._server_log_handle
+            if handle is not None:
+                handle.flush()
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        text = text.strip()
+        return text[-1200:] if text else ""
+
+    def _start_server(self) -> None:
+        port = _find_free_local_port()
+        self._server_base_url = f"http://127.0.0.1:{port}/v1"
+        log_dir = app_data_dir() / "logs" / "llama-cpp"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._server_log_path = log_dir / f"llama-{port}.log"
+        self._server_log_handle = self._server_log_path.open(
+            "a", encoding="utf-8", errors="replace"
+        )
+        creation_flags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        )
+        try:
+            self._server_process = subprocess.Popen(
+                self._server_command(port),
+                stdin=subprocess.DEVNULL,
+                stdout=self._server_log_handle,
+                stderr=subprocess.STDOUT,
+                creationflags=creation_flags,
+                close_fds=True,
+            )
+        except OSError as error:
+            raise RuntimeError(f"无法启动 llama-server：{error}") from error
+
+        health_url = self._server_base_url.removesuffix("/v1") + "/health"
+        deadline = time.monotonic() + LLAMA_CPP_START_TIMEOUT
+        last_error = ""
+        while time.monotonic() < deadline:
+            self.token.check()
+            process = self._server_process
+            if process is not None and process.poll() is not None:
+                detail = self._read_server_log_tail()
+                if detail:
+                    raise RuntimeError(
+                        "llama.cpp 启动失败，服务器已退出：\n" + detail
+                    )
+                raise RuntimeError(
+                    f"llama.cpp 启动失败，退出码 {process.returncode}"
+                )
+            try:
+                response = requests.get(health_url, timeout=(1.0, 2.0))
+                if response.status_code == 200:
+                    return
+                last_error = f"HTTP {response.status_code}"
+            except requests.RequestException as error:
+                last_error = str(error)
+            self.token.wait(0.25)
+        detail = self._read_server_log_tail()
+        message = "llama.cpp 启动超时，请检查模型、mmproj、显存和 llama-server 版本"
+        if last_error:
+            message += f"（最近状态：{last_error}）"
+        if detail:
+            message += "\n\n服务器日志：\n" + detail
+        raise RuntimeError(message)
+
+    def _billable_post(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        timeout=(10, LLAMA_CPP_READ_TIMEOUT),
+    ) -> dict[str, Any]:
+        try:
+            return super()._billable_post(url, payload, timeout=timeout)
+        except ApiError as error:
+            detail = f"{error} {error.body}".casefold()
+            unsupported_markers = any(marker in detail for marker in (
+                "unknown", "unknown field", "unsupported", "unrecognized",
+                "unexpected", "additional properties", "extra", "invalid",
+            ))
+            unsupported_fields = (
+                error.status in {400, 422, 500, 501}
+                and unsupported_markers
+                and any(
+                    field in payload
+                    for field in (
+                        "reasoning_effort",
+                        "frequency_penalty",
+                        "presence_penalty",
+                    )
+                )
+            )
+            if unsupported_fields:
+                fallback = dict(payload)
+                fallback.pop("reasoning_effort", None)
+                fallback.pop("frequency_penalty", None)
+                fallback.pop("presence_penalty", None)
+                try:
+                    return super()._billable_post(url, fallback, timeout=timeout)
+                except ApiError as fallback_error:
+                    error = fallback_error
+                    detail = f"{error} {error.body}".casefold()
+            if _is_memory_failure(detail):
+                raise RuntimeError(
+                    "llama.cpp 推理显存或内存不足，请降低 GPU 层数、上下文长度或并发数"
+                ) from error
+            if any(marker in detail for marker in (
+                "connection refused", "actively refused", "failed to establish",
+            )):
+                raise RuntimeError(
+                    "llama.cpp 本地服务已退出或无法连接，请检查服务器日志"
+                ) from error
+            server_log = self._read_server_log_tail()
+            if server_log:
+                raise RuntimeError(
+                    "llama.cpp 请求失败。请确认主 GGUF 与 mmproj 属于同一视觉模型，"
+                    "并检查以下服务器日志：\n\n" + server_log
+                ) from error
+            raise
+
+    def _sampling_payload(self) -> dict[str, Any]:
+        # Send the complete local sampling state first so compatible builds
+        # receive every user choice.  _billable_post has a compatibility
+        # fallback that removes hosted-only fields when a stricter llama-server
+        # rejects them; thinking cleanup is handled on returned text.
+        payload: dict[str, Any] = {
+            "max_tokens": self.sampling["max_tokens"],
+            "temperature": self.sampling["temperature"],
+            "top_p": self.sampling["top_p"],
+            "frequency_penalty": self.sampling["frequency_penalty"],
+            "presence_penalty": self.sampling["presence_penalty"],
+        }
+        if self.sampling["top_k"]:
+            payload["top_k"] = self.sampling["top_k"]
+        if self.sampling["seed"] is not None:
+            payload["seed"] = self.sampling["seed"]
+        # Qwen-VL chat templates used by current llama.cpp builds accept
+        # xhigh/medium/low, not OpenAI's none/default values.  ``low`` keeps
+        # the remove-thinking switch useful while avoiding the 500 Jinja
+        # exception that previously made every request look like a model
+        # failure.  Older templates are handled by the compatibility retry.
+        payload["reasoning_effort"] = (
+            "low" if self.remove_thinking_tags else "xhigh"
+        )
+        return payload
+
+    def caption_image(self, path: Path, prompt: str) -> str:
+        # Vision GGUF models can consume a large number of image tokens.  The
+        # generic API path's 2K/80-KB image policy is too aggressive for a
+        # 4K-context llama-server and often leaves no room for the caption.
+        prepared = prepare_image(
+            path,
+            size_limit=LLAMA_CPP_IMAGE_SIZE_LIMIT,
+            max_dimension=LLAMA_CPP_IMAGE_MAX_DIMENSION,
+        )
+        encoded = base64.b64encode(prepared.data).decode("ascii")
+        payload = {
+            "model": self.api_model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{prepared.mime_type};base64,{encoded}"
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        }
+        payload.update(self._sampling_payload())
+        response = self._billable_post(self._chat_url(), payload)
+        text = self._clean_text(_chat_text(response))
+        if not text:
+            raise ApiError("llama.cpp 模型返回了空结果")
+        return text
+
+    def close(self) -> None:
+        process = self._server_process
+        self._server_process = None
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=8)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        handle = self._server_log_handle
+        self._server_log_handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
 
 
 class LocalCaptionClient:
@@ -2809,9 +3185,8 @@ class LocalCaptionClient:
                 template_options = {
                     "tokenize": False,
                     "add_generation_prompt": True,
+                    "enable_thinking": not self.remove_thinking_tags,
                 }
-                if self.remove_thinking_tags:
-                    template_options["enable_thinking"] = False
                 try:
                     rendered_prompt = self.processor.apply_chat_template(
                         messages,
@@ -3130,6 +3505,8 @@ class BatchSummary:
     skipped: int = 0
     failed: int = 0
     cancelled: int = 0
+    characters: int = 0
+    elapsed_seconds: float = 0.0
     failures: list[tuple[Path, str]] = field(default_factory=list)
 
 
@@ -3179,6 +3556,12 @@ class BatchRunner:
         local_runtime: str = "huggingface",
         lmstudio_base_url: str = "http://localhost:1234/v1",
         lmstudio_model: str = "",
+        llama_server_path: str | Path = "",
+        llama_model_path: str | Path = "",
+        llama_mmproj_path: str | Path = "",
+        llama_model_alias: str = "",
+        llama_context_length: int = LLAMA_CPP_DEFAULT_CONTEXT_LENGTH,
+        llama_gpu_layers: int = LLAMA_CPP_DEFAULT_GPU_LAYERS,
         labeling_focus: str = "subject",
         output_language: str = "zh",
         trigger_word: str = "",
@@ -3190,6 +3573,7 @@ class BatchRunner:
         video_preflight: bool = True,
         enable_mtp: bool = False,
         remove_thinking_tags: bool = True,
+        write_output: bool = True,
     ) -> BatchSummary:
         self._running.set()
         model = MODELS.get(model_key, MODELS[DEFAULT_MODEL_KEY])
@@ -3202,7 +3586,7 @@ class BatchRunner:
         concurrency = max(1, min(MAX_CONCURRENCY, int(concurrency)))
         local_runtime = (
             local_runtime
-            if local_runtime in {"huggingface", "lmstudio"}
+            if local_runtime in {"huggingface", "lmstudio", "llamacpp"}
             else "huggingface"
         )
         effective_mtp = bool(
@@ -3216,13 +3600,20 @@ class BatchRunner:
             "provider": (
                 provider.key
                 if backend == "api"
-                else ("lmstudio" if local_runtime == "lmstudio" else "local")
+                else (
+                    "lmstudio" if local_runtime == "lmstudio"
+                    else ("llamacpp" if local_runtime == "llamacpp" else "local")
+                )
             ),
             "model": (
                 (
                     str(lmstudio_model).strip()
                     if local_runtime == "lmstudio"
-                    else str(Path(local_model_folder).name or local_model_folder)
+                    else (
+                        str(Path(llama_model_path).name or llama_model_path)
+                        if local_runtime == "llamacpp"
+                        else str(Path(local_model_folder).name or local_model_folder)
+                    )
                 )
                 if backend == "local"
                 else (model.key if provider.key == DEFAULT_PROVIDER_KEY else api_model)
@@ -3249,6 +3640,7 @@ class BatchRunner:
             "video_preflight": bool(video_preflight),
             "enable_mtp": effective_mtp,
             "remove_thinking_tags": remove_thinking_tags,
+            "write_output": bool(write_output),
         })
         summary = BatchSummary()
         started = time.monotonic()
@@ -3328,13 +3720,35 @@ class BatchRunner:
                         sampling=sampling,
                         remove_thinking_tags=remove_thinking_tags,
                     )
-                else:
-                    client = LocalCaptionClient(
-                        Path(local_model_folder), self.token
+                elif local_runtime == "llamacpp":
+                    client = LlamaCppCaptionClient(
+                        llama_server_path,
+                        llama_model_path,
+                        llama_mmproj_path,
+                        self.token,
+                        self.transport,
+                        model_alias=llama_model_alias,
+                        context_length=llama_context_length,
+                        gpu_layers=llama_gpu_layers,
+                        sampling=sampling,
+                        remove_thinking_tags=remove_thinking_tags,
                     )
-                    client.sampling = sampling
-                    client.enable_mtp = effective_mtp
-                    client.remove_thinking_tags = remove_thinking_tags
+                else:
+                    try:
+                        client = LocalCaptionClient(
+                            Path(local_model_folder),
+                            self.token,
+                            enable_mtp=effective_mtp,
+                            remove_thinking_tags=remove_thinking_tags,
+                        )
+                    except TypeError as error:
+                        if "unexpected keyword argument" not in str(error):
+                            raise
+                        client = LocalCaptionClient(
+                            Path(local_model_folder), self.token
+                        )
+                        client.enable_mtp = effective_mtp
+                        client.remove_thinking_tags = remove_thinking_tags
             else:
                 client = CaptionClient(
                     model,
@@ -3386,8 +3800,10 @@ class BatchRunner:
                             trigger_word,
                             output_language,
                         )
-                        write_caption(path, caption)
+                        if write_output:
+                            write_caption(path, caption)
                     except CancelledError:
+                        item_elapsed = time.monotonic() - item_started
                         with lock:
                             summary.cancelled += 1
                         journal.record(path, "cancelled", "任务已取消")
@@ -3396,9 +3812,10 @@ class BatchRunner:
                             path=path,
                             status="cancelled",
                             detail="任务已取消",
-                            elapsed_seconds=time.monotonic() - item_started,
+                            elapsed_seconds=item_elapsed,
                         )
                     except Exception as error:
+                        item_elapsed = time.monotonic() - item_started
                         detail = str(error)
                         with lock:
                             summary.failed += 1
@@ -3409,18 +3826,25 @@ class BatchRunner:
                             path=path,
                             status="failed",
                             detail=detail,
-                            elapsed_seconds=time.monotonic() - item_started,
+                            elapsed_seconds=item_elapsed,
                         )
                     else:
+                        item_elapsed = time.monotonic() - item_started
+                        character_count = count_output_characters(caption)
                         with lock:
                             summary.success += 1
+                            summary.characters += character_count
                         journal.record(path, "success", caption[:240])
                         self._emit(
                             "status",
                             path=path,
                             status="success",
                             detail=caption,
-                            elapsed_seconds=time.monotonic() - item_started,
+                            elapsed_seconds=item_elapsed,
+                            character_count=character_count,
+                            characters_per_second=(
+                                character_count / max(0.001, item_elapsed)
+                            ),
                         )
                     finally:
                         pending.task_done()
@@ -3448,10 +3872,16 @@ class BatchRunner:
                 self._emit("status", path=path, status="cancelled", detail="任务已取消")
                 pending.task_done()
             status = "stopped" if self.token.cancelled else "completed"
+            summary.elapsed_seconds = max(0.0, time.monotonic() - started)
             journal.finish(status, {
                 "total": summary.total, "success": summary.success,
                 "skipped": summary.skipped, "failed": summary.failed,
                 "cancelled": summary.cancelled,
+                "characters": summary.characters,
+                "elapsed_seconds": summary.elapsed_seconds,
+                "characters_per_second": (
+                    summary.characters / max(0.001, summary.elapsed_seconds)
+                ),
             })
             self._emit("done", status=status, summary=summary, journal_dir=journal.project_dir)
             return summary

@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -8,6 +9,91 @@ import media_caption_worker as worker
 
 
 class MediaWorkerTests(unittest.TestCase):
+    def test_trim_video_clamps_selection_and_writes_mp4(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mov"
+            source.write_bytes(b"video")
+            output = root / "clips" / "clip.mp4"
+            engine = worker.MediaEngine([root])
+            engine.ffmpeg = Path("ffmpeg")
+            engine.ffprobe = Path("ffprobe")
+
+            def run(arguments, timeout):
+                self.assertGreaterEqual(timeout, 90)
+                Path(arguments[-1]).write_bytes(b"clip")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(
+                    engine,
+                    "probe",
+                    return_value={"duration": 10.0, "video_streams": [{}]},
+                ),
+                mock.patch.object(engine, "_run", side_effect=run) as execute,
+            ):
+                result = engine.trim_video(
+                    {
+                        "path": str(source),
+                        "output_path": str(output),
+                        "start": 2.25,
+                        "end": 6.75,
+                    }
+                )
+
+            self.assertEqual(str(output.resolve()), result["path"])
+            self.assertEqual(2.25, result["start"])
+            self.assertEqual(6.75, result["end"])
+            self.assertEqual(4.5, result["duration"])
+            self.assertTrue(output.is_file())
+            arguments = execute.call_args.args[0]
+            self.assertIn("libx264", arguments)
+            self.assertIn("4.500", arguments)
+
+    def test_audio_only_selection_is_wrapped_as_mp4_for_visual_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "voice.wav"
+            source.write_bytes(b"audio")
+            output = root / "clips" / "voice.mp4"
+            engine = worker.MediaEngine([root])
+            engine.ffmpeg = Path("ffmpeg")
+            engine.ffprobe = Path("ffprobe")
+
+            def run(arguments, timeout):
+                self.assertGreaterEqual(timeout, 90)
+                Path(arguments[-1]).write_bytes(b"wrapped-audio")
+                return mock.Mock(returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(
+                    engine,
+                    "probe",
+                    return_value={
+                        "duration": 8.0,
+                        "video_streams": [],
+                        "audio_streams": [{}],
+                    },
+                ),
+                mock.patch.object(engine, "_run", side_effect=run) as execute,
+            ):
+                result = engine.trim_video(
+                    {
+                        "path": str(source),
+                        "output_path": str(output),
+                        "start": 1.0,
+                        "end": 4.5,
+                        "include_audio": False,
+                    }
+                )
+
+            arguments = execute.call_args.args[0]
+            self.assertEqual("audio", result["source_type"])
+            self.assertTrue(result["audio_included"])
+            self.assertIn("color=c=#24332d:s=1280x720:r=25", arguments)
+            self.assertIn("aac", arguments)
+            self.assertTrue(output.is_file())
+
     def test_controller_uses_random_loopback_port_and_stops_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
             controller = worker.MediaWorkerController([Path(directory)])
