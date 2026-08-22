@@ -149,8 +149,7 @@ class CoreTests(unittest.TestCase):
         version_resource = (
             project_root / "assets" / "qianyi-version-info.txt"
         ).read_text(encoding="utf-8")
-        numeric_parts = [int(part) for part in re.findall(r"\d+", core.APP_VERSION)]
-        version_parts = tuple((numeric_parts + [0, 0, 0])[:3])
+        version_parts = tuple(int(part) for part in core.APP_VERSION.split("."))
         version_quad = (*version_parts, 0)
         formatted_quad = ", ".join(str(part) for part in version_quad)
         self.assertIn(f"filevers=({formatted_quad})", version_resource)
@@ -158,7 +157,7 @@ class CoreTests(unittest.TestCase):
         for key, value in {
             "CompanyName": "芊熠智能",
             "FileDescription": "芊熠智能打标工作台",
-            "FileVersion": core.APP_VERSION,
+            "FileVersion": f"{core.APP_VERSION}.0",
             "InternalName": "QianyiMediaCaptionTool",
             "OriginalFilename": "Qianyi-MediaCaptionTool.exe",
             "ProductName": "芊熠智能打标工作台",
