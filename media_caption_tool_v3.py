@@ -4393,12 +4393,6 @@ class CaptionApp:
         ttk.Label(title_block, textvariable=self.project_count_var, style="TopbarMuted.TLabel").pack(anchor=tk.W, pady=(2, 0))
         actions = ttk.Frame(topbar, style="Topbar.TFrame")
         actions.pack(side=tk.RIGHT)
-        ttk.Button(
-            actions,
-            text="单次反推",
-            style="Primary.TButton",
-            command=self.show_single_reverse,
-        ).pack(side=tk.LEFT)
         ttk.Button(actions, text="添加项目", command=self.add_project).pack(
             side=tk.LEFT, padx=(7, 0)
         )

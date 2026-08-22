@@ -1938,6 +1938,7 @@ class GuiTests(unittest.TestCase):
                 ]
                 self.assertNotIn("平台设置", project_center_buttons)
                 self.assertNotIn("系统说明", project_center_buttons)
+                self.assertNotIn("单次反推", project_center_buttons)
                 self.assertEqual("项目中心", app.nav_buttons["project"].cget("text"))
                 self.assertEqual("系统说明", app.nav_buttons["system"].cget("text"))
                 self.assertIs(app.workspace_nav, app.nav_buttons["project"].master)
