@@ -36,27 +36,29 @@ def build_stylesheet(theme: Mapping[str, str]) -> str:
     """Build one complete stylesheet so theme changes are atomic and instant."""
     return f"""
     QWidget#root, QMainWindow {{ background: {theme['window']}; color: {theme['text']}; }}
+    QWidget#scrollContent, QScrollArea {{ background: {theme['window']}; }}
     QFrame#header, QFrame#card, QGroupBox#card {{ background: {theme['surface']}; border: 1px solid {theme['border']}; border-radius: 12px; }}
-    QGroupBox#card {{ margin-top: 12px; padding: 18px 10px 10px 10px; }}
+    QGroupBox#card {{ margin-top: 8px; padding: 12px 8px 8px 8px; }}
     QGroupBox#card::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; color: {theme['text']}; }}
+    QLabel#cardHeading {{ color: {theme['text']}; font-weight: 650; padding-bottom: 2px; }}
     QLabel {{ color: {theme['text']}; }}
     QLabel#muted {{ color: {theme['muted']}; }}
     QLabel#badge {{ background: {theme['accent_soft']}; color: {theme['accent']}; border-radius: 9px; padding: 5px 10px; font-weight: 600; }}
-    QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QSpinBox, QDoubleSpinBox {{ background: {theme['input']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 8px; padding: 7px 9px; selection-background-color: {theme['accent']}; }}
-    QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {theme['accent']}; padding: 6px 8px; }}
+    QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QSpinBox, QDoubleSpinBox {{ background: {theme['input']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 7px; padding: 5px 7px; selection-background-color: {theme['accent']}; }}
+    QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {theme['accent']}; padding: 4px 6px; }}
     QComboBox::drop-down {{ border: 0; width: 28px; }}
-    QPushButton {{ background: {theme['surface_alt']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 8px; padding: 8px 12px; }}
+    QPushButton {{ background: {theme['surface_alt']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 7px; padding: 6px 9px; }}
     QPushButton:hover {{ border-color: {theme['accent']}; }}
     QPushButton#primary {{ background: {theme['accent']}; color: #fffaf4; border: 0; font-weight: 700; }}
     QPushButton:disabled {{ color: {theme['muted']}; background: {theme['surface_alt']}; }}
     QListWidget {{ background: {theme['input']}; color: {theme['text']}; border: 1px solid {theme['border']}; border-radius: 10px; padding: 6px; }}
-    QListWidget::item {{ padding: 9px 8px; border-radius: 6px; }}
+    QListWidget::item {{ padding: 6px 7px; border-radius: 6px; }}
     QListWidget::item:selected {{ background: {theme['accent_soft']}; color: {theme['text']}; }}
     QTabWidget::pane {{ border: 1px solid {theme['border']}; border-radius: 8px; background: {theme['input']}; }}
-    QTabBar::tab {{ background: {theme['surface_alt']}; color: {theme['text']}; padding: 8px 14px; margin-right: 2px; border-radius: 6px; }}
+    QTabBar::tab {{ background: {theme['surface_alt']}; color: {theme['text']}; padding: 6px 10px; margin-right: 2px; border-radius: 6px; }}
     QTabBar::tab:selected {{ background: {theme['accent']}; color: #fffaf4; }}
-    QToolBar {{ background: {theme['surface']}; border: 0; spacing: 6px; padding: 5px; }}
-    QToolButton {{ color: {theme['text']}; padding: 6px 9px; border-radius: 6px; }}
+    QToolBar {{ background: {theme['surface']}; border: 0; spacing: 4px; padding: 3px; }}
+    QToolButton {{ color: {theme['text']}; padding: 4px 7px; border-radius: 6px; }}
     QToolButton:hover {{ background: {theme['accent_soft']}; }}
     QProgressBar {{ background: {theme['surface_alt']}; border: 0; border-radius: 6px; text-align: center; color: {theme['text']}; }}
     QProgressBar::chunk {{ background: {theme['accent']}; border-radius: 6px; }}

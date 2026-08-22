@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -30,6 +32,7 @@ class QtWorkbenchTests(unittest.TestCase):
         self.assertEqual(2, self.window.backend_box.count())
         self.assertEqual(3, self.window.runtime_box.count())
         self.assertEqual("3.6.demo", qt.APP_VERSION)
+        self.assertGreater(self.window.model_edit.count(), 0)
 
     def test_theme_switch_is_atomic_and_controls_keep_readable_styles(self):
         self.window.apply_theme("day")
@@ -51,6 +54,30 @@ class QtWorkbenchTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(self.window.llama_context.isEnabled())
         self.assertFalse(self.window.local_folder_edit.isEnabled())
+
+    def test_visible_actions_change_state_and_scan_materials(self):
+        before = self.window.seed.text()
+        self.window.randomize_seed()
+        self.assertNotEqual(before, self.window.seed.text())
+        self.window.select_mode("video")
+        self.assertEqual("video", self.window.mode_box.currentData())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sample.mp4").write_bytes(b"not-a-real-video")
+            self.window.folder_edit.setText(str(root))
+            self.window.scan_current_folder()
+            # The scanner deliberately reports unreadable media, but the click
+            # still produces a deterministic log/status response.
+            self.assertIn("扫描完成", self.window.log_edit.toPlainText())
+
+    def test_toolbar_actions_are_wired_to_real_views(self):
+        actions = {action.text(): action for action in self.window.findChildren(type(self.window.theme_action))}
+        actions["视频反推"].trigger()
+        self.assertEqual("video", self.window.mode_box.currentData())
+        actions["图像打标"].trigger()
+        self.assertEqual("image", self.window.mode_box.currentData())
+        actions["系统说明"].trigger()
+        self.assertIs(self.window.tabs.currentWidget(), self.window.system_info)
 
 
 if __name__ == "__main__":

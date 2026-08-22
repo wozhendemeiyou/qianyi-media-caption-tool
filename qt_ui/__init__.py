@@ -1,7 +1,7 @@
 """Reusable controls and state adapters for the PySide6 workbench."""
 
 from .theme import THEMES, build_stylesheet
-from .widgets import DropListWidget, PathPicker, SectionCard
+from .widgets import ContentCard, DropListWidget, EditableComboBox, PathPicker, SectionCard
 from .workers import (
     BatchWorker,
     FunctionWorker,
@@ -20,6 +20,8 @@ __all__ = [
     "LmStudioLoadWorker",
     "LmStudioUnloadWorker",
     "DropListWidget",
+    "EditableComboBox",
+    "ContentCard",
     "PathPicker",
     "ProviderTestWorker",
     "SectionCard",

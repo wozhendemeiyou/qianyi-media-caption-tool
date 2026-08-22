@@ -8,13 +8,15 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
-    QGroupBox,
+    QFrame,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QPushButton,
     QWidget,
+    QVBoxLayout,
 )
 
 
@@ -40,16 +42,56 @@ class DropListWidget(QListWidget):
         event.acceptProposedAction()
 
 
-class SectionCard(QGroupBox):
-    """Card with consistent heading metrics and form spacing."""
+class EditableComboBox(QComboBox):
+    """Editable combo that keeps the simple text API used by form state code."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setEditable(True)
+
+    def text(self) -> str:
+        return self.currentText()
+
+    def setText(self, value: str) -> None:  # noqa: N802
+        self.setEditText(value)
+
+    def setPlaceholderText(self, value: str) -> None:  # noqa: N802
+        if self.lineEdit() is not None:
+            self.lineEdit().setPlaceholderText(value)
+
+
+class SectionCard(QFrame):
+    """Card with a custom heading, avoiding native QGroupBox paint artifacts."""
 
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
-        super().__init__(title, parent)
+        super().__init__(parent)
         self.setObjectName("card")
-        self.form = QFormLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 8)
+        heading = QLabel(title)
+        heading.setObjectName("cardHeading")
+        outer.addWidget(heading)
+        self.body = QWidget()
+        self.form = QFormLayout(self.body)
         self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.form.setHorizontalSpacing(10)
         self.form.setVerticalSpacing(8)
+        outer.addWidget(self.body)
+
+
+class ContentCard(QFrame):
+    """Card with a free-form body layout for prompts and media previews."""
+
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("card")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 8)
+        heading = QLabel(title)
+        heading.setObjectName("cardHeading")
+        outer.addWidget(heading)
+        self.body_layout = QVBoxLayout()
+        outer.addLayout(self.body_layout)
 
 
 class PathPicker(QWidget):

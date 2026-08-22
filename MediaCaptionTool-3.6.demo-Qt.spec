@@ -22,6 +22,7 @@ a = Analysis(
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
+        "media_caption_tool_v3",
         "_pillow_heif",
         "imageio_ffmpeg",
     ],

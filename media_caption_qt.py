@@ -59,7 +59,9 @@ except ImportError:  # pragma: no cover - exercised only without the optional ex
 import media_caption_core as core
 from qt_ui import (
     BatchWorker,
+    ContentCard,
     DropListWidget,
+    EditableComboBox,
     FunctionWorker,
     LmStudioInventoryWorker,
     LmStudioLoadWorker,
@@ -83,7 +85,7 @@ def _ensure_qt() -> None:
         )
 
 
-def _font(size: int = 14, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+def _font(size: int = 12, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
     font = QFont("Microsoft YaHei UI", size)
     font.setWeight(weight)
     return font
@@ -99,10 +101,10 @@ class SingleMediaDialog(QDialog):
         self.probe_info: dict[str, Any] = {}
         self._worker: FunctionWorker | None = None
         self.setWindowTitle("单次反推 · 音视频片段编辑器")
-        self.setMinimumSize(680, 430)
+        self.setMinimumSize(620, 380)
         layout = QVBoxLayout(self)
         heading = QLabel("✂ 音视频片段编辑器")
-        heading.setFont(_font(19, QFont.Weight.Bold))
+        heading.setFont(_font(16, QFont.Weight.Bold))
         layout.addWidget(heading)
         intro = QLabel("手工选择起止时间，截取后可直接加入单次反推；原文件不会被修改。")
         intro.setWordWrap(True)
@@ -271,9 +273,11 @@ class ModernMainWindow(QMainWindow):
         self._provider_model_memory: dict[str, str] = dict(
             self.settings.get("api_models") or {}
         )
+        self.latest_release: dict[str, Any] | None = None
+        self._platform_rows: dict[str, tuple[QWidget, QWidget]] = {}
         self.setWindowTitle(f"{APP_TITLE}  v{APP_VERSION}")
-        self.setMinimumSize(1180, 760)
-        self.resize(1440, 900)
+        self.setMinimumSize(1024, 680)
+        self.resize(1280, 820)
         self._build_shell()
         self._load_settings_into_widgets()
         self.apply_theme(self.current_theme)
@@ -289,8 +293,8 @@ class ModernMainWindow(QMainWindow):
         self.addToolBar(toolbar)
         nav_items = (
             ("项目中心", "选择目录并扫描素材", self.focus_project_center),
-            ("图像打标", "图片批量反推", lambda: self.select_mode("image")),
-            ("视频反推", "视频批量反推", lambda: self.select_mode("video")),
+            ("图像打标", "图片批量反推", lambda _checked=False: self.select_mode("image")),
+            ("视频反推", "视频批量反推", lambda _checked=False: self.select_mode("video")),
             ("单次反推", "单张/单个媒体，不改写原 TXT", self.focus_single_reverse),
             ("平台设置", "运行后端与模型设置", self.focus_platform_settings),
             ("系统说明", "功能说明与版本检查", self.focus_system_info),
@@ -358,10 +362,10 @@ class ModernMainWindow(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(16, 12, 16, 12)
         title = QLabel("芊熠智能打标工作台")
-        title.setFont(_font(21, QFont.Weight.Bold))
+        title.setFont(_font(18, QFont.Weight.Bold))
         subtitle = QLabel("现代 Qt 迁移试用版 · 核心能力与现有工作台共用")
         subtitle.setObjectName("muted")
-        subtitle.setFont(_font(13))
+        subtitle.setFont(_font(11))
         text = QVBoxLayout()
         text.addWidget(title)
         text.addWidget(subtitle)
@@ -385,11 +389,12 @@ class ModernMainWindow(QMainWindow):
     def _group(self, title: str, object_name: str = "card") -> SectionCard:
         group = SectionCard(title)
         group.setObjectName(object_name)
-        group.setFont(_font(15, QFont.Weight.Bold))
+        group.setFont(_font(13, QFont.Weight.Bold))
         return group
 
     def _build_left_column(self) -> QWidget:
         content = QWidget()
+        content.setObjectName("scrollContent")
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
@@ -398,6 +403,20 @@ class ModernMainWindow(QMainWindow):
         layout.addStretch(1)
         return self._scroll(content)
 
+    def _platform_add_row(self, form: QFormLayout, key: str, label: str, field: QWidget) -> None:
+        form.addRow(label, field)
+        label_widget = form.labelForField(field)
+        if label_widget is not None:
+            self._platform_rows[key] = (label_widget, field)
+
+    def _set_platform_row_visible(self, key: str, visible: bool) -> None:
+        row = self._platform_rows.get(key)
+        if row is None:
+            return
+        label_widget, field = row
+        label_widget.setVisible(visible)
+        field.setVisible(visible)
+
     def _build_platform_group(self) -> QWidget:
         group = self._group("◈ 平台设置")
         form = group.form
@@ -405,47 +424,48 @@ class ModernMainWindow(QMainWindow):
         self.backend_box.addItem("外部 API", "api")
         self.backend_box.addItem("本地模型", "local")
         self.backend_box.currentIndexChanged.connect(self._backend_changed)
-        form.addRow("运行后端", self.backend_box)
+        self._platform_add_row(form, "backend", "运行后端", self.backend_box)
 
         self.provider_box = QComboBox()
         for key, provider in core.API_PROVIDERS.items():
             self.provider_box.addItem(provider.label, key)
         self.provider_box.currentIndexChanged.connect(self._provider_changed)
-        form.addRow("供应商", self.provider_box)
-        self.model_edit = QLineEdit()
+        self._platform_add_row(form, "provider", "供应商", self.provider_box)
+        self.model_edit = EditableComboBox()
         self.model_edit.setPlaceholderText("模型 ID，例如 gpt-5.6 / qwen3.8-max")
-        form.addRow("模型", self.model_edit)
+        self._platform_add_row(form, "model", "模型", self.model_edit)
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("仅保存在当前 Windows 账户")
-        form.addRow("API KEY", self.api_key_edit)
+        self._platform_add_row(form, "api_key", "API KEY", self.api_key_edit)
         self.endpoint_edit = QLineEdit()
         self.endpoint_edit.setPlaceholderText("仅自定义接口需要填写")
-        form.addRow("Base URL", self.endpoint_edit)
+        self._platform_add_row(form, "endpoint", "Base URL", self.endpoint_edit)
         self.provider_test_button = QPushButton("测试连接")
         self.provider_test_button.clicked.connect(self.test_provider)
-        form.addRow("API 平台", self.provider_test_button)
+        self._platform_add_row(form, "provider_test", "API 平台", self.provider_test_button)
 
         self.runtime_box = QComboBox()
         self.runtime_box.addItem("Hugging Face 本地目录", "huggingface")
         self.runtime_box.addItem("LM Studio 本地服务", "lmstudio")
         self.runtime_box.addItem("llama.cpp 原生 GGUF", "llamacpp")
         self.runtime_box.currentIndexChanged.connect(self._runtime_changed)
-        form.addRow("本地运行方式", self.runtime_box)
+        self._platform_add_row(form, "runtime", "本地运行方式", self.runtime_box)
 
         self.local_folder_edit = QLineEdit()
         local_browse = QPushButton("选择…")
         local_browse.clicked.connect(self._choose_local_folder)
-        form.addRow("模型目录", self._with_button(self.local_folder_edit, local_browse))
+        local_host = self._with_button(self.local_folder_edit, local_browse)
+        self._platform_add_row(form, "local_folder", "模型目录", local_host)
         self.lm_url_edit = QLineEdit()
-        form.addRow("LM Base URL", self.lm_url_edit)
+        self._platform_add_row(form, "lm_url", "LM Base URL", self.lm_url_edit)
         self.lm_model_edit = QLineEdit()
-        form.addRow("LM 模型", self.lm_model_edit)
+        self._platform_add_row(form, "lm_model", "LM 模型", self.lm_model_edit)
         self.lm_profile_box = QComboBox()
         self.lm_profile_box.addItem("低显存安全", "low_vram")
         self.lm_profile_box.addItem("纯 CPU", "cpu")
         self.lm_profile_box.addItem("沿用预设", "inherit")
-        form.addRow("LM 加载策略", self.lm_profile_box)
+        self._platform_add_row(form, "lm_profile", "LM 加载策略", self.lm_profile_box)
         lm_actions = QHBoxLayout()
         self.lm_refresh_button = QPushButton("刷新模型")
         self.lm_refresh_button.clicked.connect(self.refresh_lm_models)
@@ -458,25 +478,25 @@ class ModernMainWindow(QMainWindow):
         lm_actions.addWidget(self.lm_unload_button)
         lm_host = QWidget()
         lm_host.setLayout(lm_actions)
-        form.addRow("LM Studio", lm_host)
+        self._platform_add_row(form, "lm_actions", "LM Studio", lm_host)
         self.lm_instance_edit = QLineEdit()
         self.lm_instance_edit.setPlaceholderText("加载后自动填入实例 ID")
-        form.addRow("实例 ID", self.lm_instance_edit)
+        self._platform_add_row(form, "lm_instance", "实例 ID", self.lm_instance_edit)
         self.llama_server_edit = QLineEdit()
         self.llama_model_edit = QLineEdit()
         self.llama_mmproj_edit = QLineEdit()
-        form.addRow("llama-server", self._path_row(self.llama_server_edit, False))
-        form.addRow("GGUF 主模型", self._path_row(self.llama_model_edit, False))
-        form.addRow("视觉 mmproj", self._path_row(self.llama_mmproj_edit, False))
+        self._platform_add_row(form, "llama_server", "llama-server", self._path_row(self.llama_server_edit, False))
+        self._platform_add_row(form, "llama_model", "GGUF 主模型", self._path_row(self.llama_model_edit, False))
+        self._platform_add_row(form, "llama_mmproj", "视觉 mmproj", self._path_row(self.llama_mmproj_edit, False))
         self.llama_context = self._spin(512, 131072, core.LLAMA_CPP_DEFAULT_CONTEXT_LENGTH)
         self.llama_gpu_layers = self._spin(-1, 999, core.LLAMA_CPP_DEFAULT_GPU_LAYERS)
-        form.addRow("GGUF 上下文", self.llama_context)
-        form.addRow("GPU 层数", self.llama_gpu_layers)
+        self._platform_add_row(form, "llama_context", "GGUF 上下文", self.llama_context)
+        self._platform_add_row(form, "llama_gpu", "GPU 层数", self.llama_gpu_layers)
 
         self.mtp_check = QCheckBox("启用 MTP（仅兼容的 Hugging Face 模型）")
         self.thinking_check = QCheckBox("移除思考标签")
-        form.addRow("推理控制", self.mtp_check)
-        form.addRow("输出清理", self.thinking_check)
+        self._platform_add_row(form, "mtp", "推理控制", self.mtp_check)
+        self._platform_add_row(form, "thinking", "输出清理", self.thinking_check)
         self.platform_save = QPushButton("保存平台设置")
         self.platform_save.clicked.connect(self.save_settings)
         form.addRow("", self.platform_save)
@@ -527,7 +547,7 @@ class ModernMainWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         title_row = QHBoxLayout()
         title = QLabel("▣ 素材区")
-        title.setFont(_font(16, QFont.Weight.Bold))
+        title.setFont(_font(14, QFont.Weight.Bold))
         title_row.addWidget(title)
         title_row.addStretch(1)
         self.mode_box = QComboBox()
@@ -555,10 +575,8 @@ class ModernMainWindow(QMainWindow):
         self.material_hint.setObjectName("muted")
         self.material_hint.setWordWrap(True)
         layout.addWidget(self.material_hint)
-        prompt_group = QGroupBox("✦ 用户提示词")
-        prompt_group.setObjectName("card")
-        prompt_group.setFont(_font(15, QFont.Weight.Bold))
-        prompt_layout = QVBoxLayout(prompt_group)
+        prompt_group = ContentCard("✦ 用户提示词")
+        prompt_layout = prompt_group.body_layout
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText("输入你希望模型重点描述的内容…")
         self.prompt_edit.setMinimumHeight(115)
@@ -592,7 +610,7 @@ class ModernMainWindow(QMainWindow):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(14, 14, 14, 14)
         title = QLabel("◈ 结果与运行日志")
-        title.setFont(_font(16, QFont.Weight.Bold))
+        title.setFont(_font(14, QFont.Weight.Bold))
         layout.addWidget(title)
         self.tabs = QTabWidget()
         self.result_edit = QPlainTextEdit()
@@ -620,11 +638,15 @@ class ModernMainWindow(QMainWindow):
         self.export_csv_button.clicked.connect(lambda: self.export_captions("csv"))
         self.update_button = QPushButton("检查更新")
         self.update_button.clicked.connect(self.check_updates)
+        self.install_update_button = QPushButton("下载并覆盖安装")
+        self.install_update_button.setEnabled(False)
+        self.install_update_button.clicked.connect(self.install_update)
         action_row.addWidget(self.save_result_button)
         action_row.addWidget(self.export_json_button)
         action_row.addWidget(self.export_csv_button)
         action_row.addStretch(1)
         action_row.addWidget(self.update_button)
+        action_row.addWidget(self.install_update_button)
         layout.addLayout(action_row)
         self.metrics = QLabel("尚未开始任务")
         self.metrics.setObjectName("muted")
@@ -707,6 +729,17 @@ class ModernMainWindow(QMainWindow):
 
     def _backend_changed(self) -> None:
         is_api = self.backend_box.currentData() == "api"
+        for key in ("provider", "model", "api_key", "provider_test"):
+            self._set_platform_row_visible(key, is_api)
+        self._set_platform_row_visible(
+            "endpoint", is_api and self.provider_box.currentData() == "custom"
+        )
+        for key in (
+            "runtime", "local_folder", "lm_url", "lm_model", "lm_profile",
+            "lm_actions", "lm_instance", "llama_server", "llama_model",
+            "llama_mmproj", "llama_context", "llama_gpu", "mtp",
+        ):
+            self._set_platform_row_visible(key, not is_api)
         for widget in (
             self.provider_box, self.model_edit, self.api_key_edit,
             self.endpoint_edit, self.provider_test_button,
@@ -727,14 +760,34 @@ class ModernMainWindow(QMainWindow):
     def _provider_changed(self) -> None:
         key = str(self.provider_box.currentData() or core.DEFAULT_PROVIDER_KEY)
         if self.provider_box.isEnabled():
-            self.model_edit.setText(self._model_for_provider(key))
+            provider = core.API_PROVIDERS.get(key)
+            suggestions = list(provider.model_suggestions if provider else ())
+            current = self._model_for_provider(key)
+            self.model_edit.blockSignals(True)
+            self.model_edit.clear()
+            self.model_edit.addItems(suggestions)
+            self.model_edit.setText(current)
+            self.model_edit.blockSignals(False)
         custom = key == "custom"
         self.endpoint_edit.setEnabled(custom and self.backend_box.currentData() == "api")
-        self.endpoint_edit.setVisible(custom)
+        self._set_platform_row_visible(
+            "endpoint", custom and self.backend_box.currentData() == "api"
+        )
 
     def _runtime_changed(self) -> None:
         local = self.backend_box.currentData() == "local"
         runtime = self.runtime_box.currentData()
+        for key in ("local_folder", "lm_url", "lm_model", "lm_profile", "lm_actions", "lm_instance", "llama_server", "llama_model", "llama_mmproj", "llama_context", "llama_gpu", "mtp"):
+            self._set_platform_row_visible(key, False)
+        if local and runtime == "huggingface":
+            self._set_platform_row_visible("local_folder", True)
+            self._set_platform_row_visible("mtp", True)
+        elif local and runtime == "lmstudio":
+            for key in ("lm_url", "lm_model", "lm_profile", "lm_actions", "lm_instance"):
+                self._set_platform_row_visible(key, True)
+        elif local and runtime == "llamacpp":
+            for key in ("llama_server", "llama_model", "llama_mmproj", "llama_context", "llama_gpu"):
+                self._set_platform_row_visible(key, True)
         self.local_folder_edit.setEnabled(local and runtime == "huggingface")
         self.lm_url_edit.setEnabled(local and runtime == "lmstudio")
         self.lm_model_edit.setEnabled(local and runtime == "lmstudio")
@@ -920,6 +973,8 @@ class ModernMainWindow(QMainWindow):
     def scan_current_folder(self) -> None:
         folder = Path(self.folder_edit.text().strip())
         if not folder.is_dir():
+            self.log("扫描未执行：请先选择存在的项目目录。")
+            self.statusBar().showMessage("项目目录无效", 3000)
             return
         mode = str(self.mode_box.currentData())
         scan = core.scan_media(folder, mode)
@@ -932,6 +987,7 @@ class ModernMainWindow(QMainWindow):
             item.setToolTip(str(path))
             self.material_list.addItem(item)
         self.log(f"扫描完成：{len(self.media_paths)} 个{('图片' if mode == 'image' else '视频')}素材。")
+        self.statusBar().showMessage(f"扫描完成：{len(self.media_paths)} 个素材", 3000)
         self.progress.setValue(0)
 
     def add_dropped_files(self, paths: list[Path]) -> None:
@@ -1133,8 +1189,10 @@ class ModernMainWindow(QMainWindow):
         self._track_aux_worker(worker)
 
     def _update_checked(self, release: dict[str, Any]) -> None:
+        self.latest_release = release
         tag = str(release.get("tag") or release.get("name") or "未知版本")
         if release.get("is_newer"):
+            self.install_update_button.setEnabled(bool(release.get("windows_asset")))
             self.system_info.setHtml(
                 f"<h2>发现新版本 {tag}</h2>"
                 "<p>当前是演示架构版本，更新前请先保存任务和设置。</p>"
@@ -1143,7 +1201,52 @@ class ModernMainWindow(QMainWindow):
             self.log(f"发现新版本：{tag}，请在经典工作台执行覆盖安装。")
         else:
             self.log(f"当前已是最新版本（当前 {APP_VERSION}，远端 {tag}）。")
+            self.install_update_button.setEnabled(False)
         self.statusBar().showMessage("更新检查完成", 3000)
+
+    def install_update(self) -> None:
+        release = self.latest_release or {}
+        asset = release.get("windows_asset")
+        if not isinstance(asset, dict):
+            self.log("没有可用的 Windows 更新包，请先检查更新。")
+            return
+        if not getattr(sys, "frozen", False):
+            self.log("源码运行不会覆盖当前 Python 入口；冻结版 EXE 可执行应用内覆盖安装。")
+            self.statusBar().showMessage("源码模式暂不执行覆盖安装", 3000)
+            return
+        self.install_update_button.setEnabled(False)
+        self.log("正在下载更新包并校验 SHA-256…")
+        worker = FunctionWorker(
+            core.download_release_asset,
+            asset,
+            core.app_data_dir() / "updates",
+        )
+        worker.succeeded.connect(self._update_downloaded)
+        worker.failed.connect(lambda message: self._update_install_failed(message))
+        worker.finished.connect(lambda: self.install_update_button.setEnabled(True))
+        self._track_aux_worker(worker)
+
+    def _update_downloaded(self, package_path: Path) -> None:
+        try:
+            destination = core.app_data_dir() / "updates" / "extracted"
+            executable = core.extract_update_executable(package_path, destination)
+            script = core.create_windows_update_script(
+                executable,
+                Path(sys.executable),
+                os.getpid(),
+                core.app_data_dir() / "updates",
+                restart=True,
+            )
+            core.launch_windows_update_installer(script)
+        except Exception as error:
+            self._update_install_failed(str(error))
+            return
+        self.log("更新包已校验，应用将关闭并自动覆盖安装后重启。")
+        self.close()
+
+    def _update_install_failed(self, message: str) -> None:
+        self.log(f"应用内更新失败：{message}")
+        self.statusBar().showMessage("应用内更新失败", 4000)
 
     # ----- theme / migration --------------------------------------------
     def _qss(self, theme: dict[str, str]) -> str:
@@ -1163,6 +1266,11 @@ class ModernMainWindow(QMainWindow):
 
     def open_legacy_workbench(self) -> None:
         """Keep all legacy-only dialogs available during incremental migration."""
+        if getattr(sys, "frozen", False):
+            import subprocess
+            subprocess.Popen([sys.executable, "--legacy"], cwd=str(Path(sys.executable).parent))
+            self.statusBar().showMessage("已打开经典完整工作台", 3000)
+            return
         source = Path(__file__).with_name("media_caption_tool_v3.py")
         if not source.is_file():
             QMessageBox.warning(self, "经典工作台不可用", "找不到 Tk 版入口文件。")
@@ -1183,13 +1291,17 @@ class ModernMainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
-    _ensure_qt()
     args = argv if argv is not None else sys.argv[1:]
+    if "--legacy" in args:
+        from media_caption_tool_v3 import main as legacy_main
+        result = legacy_main()
+        return int(result or 0)
+    _ensure_qt()
     if "--smoke-test" in args:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication([sys.argv[0], *args])
     app.setApplicationName("Qianyi Media Caption Tool")
-    app.setFont(_font(14))
+    app.setFont(_font(12))
     window = ModernMainWindow()
     if "--smoke-test" in args:
         window.show()
