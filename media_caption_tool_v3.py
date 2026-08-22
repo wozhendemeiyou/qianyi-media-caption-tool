@@ -354,6 +354,149 @@ def enable_dpi_awareness() -> None:
         pass
 
 
+def create_unmapped_root() -> tk.Tk:
+    """Create Tk without letting its default ``.`` window enter the desktop.
+
+    ``tk.Tk()`` initializes and maps the native root before Python gets a
+    chance to call ``withdraw()``.  On Windows that creates a short-lived
+    blank window at the default origin (usually the upper-left corner).  The
+    two-phase Tk initialization below loads Tcl first, loads Tk explicitly,
+    and withdraws ``.`` in the same startup turn before any idle/layout pass
+    can paint it.  TkDND is loaded after Tk is ready; its wrapper methods are
+    installed on ``BaseWidget`` when the package is imported, so regular
+    widgets retain drag-and-drop support even though the root itself is a
+    plain ``tk.Tk`` instance.
+
+    The returned root is unmapped before the first event-loop turn.  The first
+    desktop-visible window is therefore the fully configured launch page, not
+    a bootstrap window that has to be hidden after the fact.
+    """
+    root = tk.Tk(useTk=False)
+    root.loadtk()
+    try:
+        root.tk.call("wm", "withdraw", ".")
+    except tk.TclError:
+        # ``loadtk`` normally makes the wm command available.  Keep a safe
+        # fallback for unusual Tcl/Tk builds while preserving the same API.
+        root.withdraw()
+    if TkinterDnD is not None:
+        try:
+            # TkinterDnD.Tk.__init__ only does these two operations after its
+            # own Tk() call; reproduce them without constructing a mapped
+            # intermediate root.
+            root.TkdndVersion = TkinterDnD._require(root)
+        except (AttributeError, RuntimeError, tk.TclError):
+            # Drag-and-drop is optional; file-picker buttons remain available
+            # when the bundled tkdnd binary is unavailable.
+            root.TkdndVersion = None
+    return root
+
+
+def configure_windows_taskbar_identity(root: tk.Tk) -> None:
+    """Make the Tk root a normal taskbar application on Windows.
+
+    Tk can create a window with the ``WS_EX_TOOLWINDOW`` bit after starting
+    from a withdrawn splash screen.  Such a window may be visible but have no
+    taskbar button, and Windows then has nothing reliable to restore when the
+    user clicks the taskbar.  Explicitly assigning an AppUserModelID and
+    forcing the root style to ``WS_EX_APPWINDOW`` keeps the identity stable
+    through splash -> workspace transitions and minimize/restore cycles.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        shell32 = ctypes.windll.shell32
+        shell32.SetCurrentProcessExplicitAppUserModelID(
+            ctypes.c_wchar_p("Qianyi.MediaCaptionTool")
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    try:
+        # Tk exposes these attributes on Windows; keeping toolwindow false is
+        # important because tool windows deliberately do not appear in the
+        # taskbar or Alt+Tab.
+        root.wm_attributes("-toolwindow", False)
+        root.wm_attributes("-topmost", False)
+        root.update_idletasks()
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetAncestor(root.winfo_id(), 2))  # GA_ROOT
+        if not hwnd:
+            hwnd = int(root.winfo_id())
+        get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        exstyle = int(get_long(hwnd, -20))  # GWL_EXSTYLE
+        exstyle &= ~0x00000080  # WS_EX_TOOLWINDOW
+        exstyle |= 0x00040000   # WS_EX_APPWINDOW
+        set_long(hwnd, -20, exstyle)
+        user32.SetWindowPos(
+            hwnd,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x0001 | 0x0002 | 0x0004 | 0x0020,  # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
+        )
+        apply_windows_window_icons(root, hwnd)
+    except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+        pass
+
+
+def apply_windows_window_icons(root: tk.Tk, hwnd: int | None = None) -> None:
+    """Assign DPI-aware small and large HICONs to the real top-level window.
+
+    ``iconbitmap`` lets Tk choose a shell size, and on some Windows builds it
+    ends up reusing the 16px title-bar image for the taskbar.  Explicitly
+    setting both ``WM_SETICON/ICON_SMALL`` and ``WM_SETICON/ICON_BIG`` makes
+    Explorer use the matching ICO entries instead.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        if hwnd is None:
+            hwnd = int(user32.GetAncestor(root.winfo_id(), 2)) or int(root.winfo_id())
+        if getattr(root, "_qianyi_hicons", None):
+            small, big = root._qianyi_hicons
+        else:
+            dpi = 96
+            get_dpi = getattr(user32, "GetDpiForWindow", None)
+            if get_dpi is not None:
+                try:
+                    dpi = max(96, int(get_dpi(hwnd)))
+                except (OSError, TypeError, ValueError):
+                    dpi = 96
+            get_metrics_dpi = getattr(user32, "GetSystemMetricsForDpi", None)
+            if get_metrics_dpi is not None:
+                small_w = int(get_metrics_dpi(49, dpi))
+                small_h = int(get_metrics_dpi(50, dpi))
+                big_w = int(get_metrics_dpi(11, dpi))
+                big_h = int(get_metrics_dpi(12, dpi))
+            else:
+                small_w = int(user32.GetSystemMetrics(49))
+                small_h = int(user32.GetSystemMetrics(50))
+                big_w = int(user32.GetSystemMetrics(11))
+                big_h = int(user32.GetSystemMetrics(12))
+            load_image = user32.LoadImageW
+            load_image.restype = ctypes.c_void_p
+            icon_path = str(resource_path("assets/qianyi-app.ico"))
+            flags = 0x00000010  # LR_LOADFROMFILE
+            small = load_image(None, icon_path, 1, small_w, small_h, flags)
+            big = load_image(None, icon_path, 1, big_w, big_h, flags)
+            if not small or not big:
+                return
+            root._qianyi_hicons = (small, big)
+        user32.SendMessageW.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p
+        ]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        user32.SendMessageW(hwnd, 0x0080, 0, small)  # WM_SETICON / ICON_SMALL
+        user32.SendMessageW(hwnd, 0x0080, 1, big)    # WM_SETICON / ICON_BIG
+        user32.SendMessageW(hwnd, 0x0080, 2, small)  # WM_SETICON / ICON_SMALL2
+    except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+        pass
+
+
 def configure_tk_rendering(root: tk.Tk) -> None:
     """Keep Windows from enlarging Tk widgets a second time.
 
@@ -1138,6 +1281,7 @@ class CaptionApp:
         self._typography_bucket: str | None = None
         self._window_suspended = False
         self._window_resume_after_id = None
+        self._window_resume_attempts = 0
         self.theme_buttons: dict[str, list[ttk.Button]] = {
             "night": [],
             "day": [],
@@ -1199,6 +1343,18 @@ class CaptionApp:
             )
 
     def _set_window_icon(self) -> None:
+        # On Windows, let the multi-resolution ICO drive the title bar and
+        # taskbar icon.  Feeding a single 512px PhotoImage to ``iconphoto``
+        # makes Tk downsample the same bitmap for every shell size, which is
+        # noticeably soft at 16–32px.  The PNG remains available for the
+        # launch artwork and non-Windows Tk backends.
+        if sys.platform == "win32":
+            try:
+                self.root.iconbitmap(default=str(resource_path("assets/qianyi-app.ico")))
+                apply_windows_window_icons(self.root)
+            except tk.TclError:
+                pass
+            return
         try:
             with Image.open(resource_path("assets/qianyi-app-icon.png")) as source:
                 self._app_icon_photo = ImageTk.PhotoImage(
@@ -1207,10 +1363,6 @@ class CaptionApp:
             self.root.iconphoto(True, self._app_icon_photo)
         except (OSError, RuntimeError, ValueError, tk.TclError):
             self._app_icon_photo = None
-        try:
-            self.root.iconbitmap(default=str(resource_path("assets/qianyi-app.ico")))
-        except tk.TclError:
-            pass
 
     def _load_toolbar_icons(self) -> None:
         icon_keys = (
@@ -2190,6 +2342,11 @@ class CaptionApp:
     def _window_mapped(self, event) -> None:
         if self.closing or event.widget is not self.root or not self._window_suspended:
             return
+        # A Windows taskbar restore can deliver <Map> while Tk still reports
+        # the old iconic state for one event loop turn.  Do not leave the
+        # window in the suspended path indefinitely; retry briefly and then
+        # explicitly bring the root to the foreground.
+        self._window_resume_attempts = 0
         if self._window_resume_after_id is not None:
             try:
                 self.root.after_cancel(self._window_resume_after_id)
@@ -2205,9 +2362,19 @@ class CaptionApp:
             return
         try:
             if str(self.root.state()) in {"iconic", "withdrawn"}:
+                self._window_resume_attempts += 1
+                if self._window_resume_attempts < 8:
+                    self._window_resume_after_id = self.root.after(
+                        120, self._resume_after_window_map
+                    )
                 return
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
         except tk.TclError:
             return
+        self._window_resume_attempts = 0
         self._window_suspended = False
         if self.workspace_frame.winfo_manager() != "pack":
             return
@@ -4607,6 +4774,7 @@ class CaptionApp:
             self.root.geometry(geometry)
             self.root.configure(background="#090d1d")
             self.root.wm_attributes("-topmost", True)
+            configure_windows_taskbar_identity(self.root)
         except tk.TclError:
             pass
 
@@ -4618,6 +4786,7 @@ class CaptionApp:
             self.root.wm_attributes("-topmost", False)
             self.root.configure(background=COLORS["bg"])
             self.root.state("normal")
+            configure_windows_taskbar_identity(self.root)
             geometry = getattr(self, "normal_geometry", None)
             if not geometry:
                 geometry = configure_main_window(self.root)
@@ -10188,10 +10357,11 @@ def main() -> None:
     if "--qianyi-worker" in sys.argv:
         raise SystemExit(run_worker_cli(sys.argv[1:]))
     enable_dpi_awareness()
-    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
+    root = create_unmapped_root()
     smoke_test = "--smoke-test" in sys.argv
-    if smoke_test:
-        root.withdraw()
+    # The root was created in a withdrawn Tcl/Tk phase above.  No mapped
+    # bootstrap window is involved in the startup sequence.
+    configure_windows_taskbar_identity(root)
     app = CaptionApp(root, show_splash=not smoke_test)
     if smoke_test:
         if app._compose_launch_background(640, 360).size != (640, 360):

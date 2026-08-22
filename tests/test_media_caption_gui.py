@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
 import unittest
+import sys
 from unittest import mock
 
 from PIL import Image, ImageGrab
@@ -52,6 +53,28 @@ class GuiTests(unittest.TestCase):
         root.geometry.assert_called_once_with("1720x1200+420+120")
         root.minsize.assert_called_once_with(1024, 720)
         root.state.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows taskbar style only exists on Windows")
+    def test_windows_root_keeps_taskbar_app_style_through_restore(self):
+        import ctypes
+
+        root = tk.Tk()
+        try:
+            gui.configure_windows_taskbar_identity(root)
+            root.update_idletasks()
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            hwnd = int(user32.GetAncestor(root.winfo_id(), 2))
+            exstyle = int(user32.GetWindowLongPtrW(hwnd, -20))
+            self.assertTrue(exstyle & 0x00040000)  # WS_EX_APPWINDOW
+            self.assertFalse(exstyle & 0x00000080)  # WS_EX_TOOLWINDOW
+            root.iconify()
+            root.update()
+            root.deiconify()
+            root.state("normal")
+            root.update()
+            self.assertEqual("normal", root.state())
+        finally:
+            root.destroy()
 
     def test_gallery_resize_reflows_existing_cards_without_rebuilding(self):
         root = tk.Tk()
